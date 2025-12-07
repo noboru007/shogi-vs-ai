@@ -1,13 +1,27 @@
 {
     "hosting": {
-        "source": ".",
+        "public": "static",
         "ignore": [
             "firebase.json",
             "**/.*",
             "**/node_modules/**"
         ],
-        "frameworksBackend": {
-            "region": "asia-northeast1"
-        }
+        "rewrites": [
+            {
+                "source": "**",
+                "function": "shogi_api"
+            }
+        ]
+    },
+    "functions": {
+        "source": "functions",
+        "codebase": "default",
+        "ignore": [
+            "venv",
+            ".git",
+            "firebase-debug.log",
+            "firebase-debug.log.*"
+        ],
+        "runtime": "python311"
     }
 }

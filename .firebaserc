@@ -1,5 +1,8 @@
 {
   "projects": {
-    "default": "shogi-vs-ai"
-  }
+    "default": "shogi-vs-ai",
+    "staging": "shogi-vs-ai"
+  },
+  "targets": {},
+  "etags": {}
 }

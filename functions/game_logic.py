@@ -297,6 +297,32 @@ class ShogiGame:
             score -= PIECE_VALUES.get(name, 0) * count * 1.1
         return score
 
+    # === JSON Serialization for Firestore ===
+    def to_dict(self):
+        return {
+            "board": self.board,
+            "hands": self.hands,
+            "turn": self.turn,
+            "game_over": self.game_over,
+            "move_count": self.move_count,
+            "last_move": self.last_move,
+            "vs_ai": self.vs_ai
+        }
+
+    def from_state(self, state):
+        self.board = state.get("board", self.board)
+        # Convert keys in hands back to int if they became strings (JSON dict keys are strings)
+        raw_hands = state.get("hands", self.hands)
+        self.hands = {}
+        for k, v in raw_hands.items():
+            self.hands[int(k)] = v
+            
+        self.turn = state.get("turn", self.turn)
+        self.game_over = state.get("game_over", self.game_over)
+        self.move_count = state.get("move_count", self.move_count)
+        self.last_move = state.get("last_move", self.last_move)
+        self.vs_ai = state.get("vs_ai", self.vs_ai)
+
     # === SFEN生成機能 ===
     def get_sfen(self):
         sfen_rows = []
@@ -345,6 +371,87 @@ class ShogiGame:
             hands_sfen = "-"
             
         return f"{board_sfen} {turn_sfen} {hands_sfen} {self.move_count}"
+
+    def from_sfen(self, sfen):
+        try:
+            parts = sfen.split(" ")
+            board_str = parts[0]
+            turn_str = parts[1]
+            hands_str = parts[2]
+            move_count_str = parts[3] if len(parts) > 3 else "1"
+
+            # Reset Board
+            self.board = [[None for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
+            
+            # Reverse Map
+            reverse_map = {v: k for k, v in SFEN_MAP.items()}
+            
+            # Parse Board
+            rows = board_str.split("/")
+            for y, row_data in enumerate(rows):
+                x = 0
+                i = 0
+                while i < len(row_data):
+                    char = row_data[i]
+                    if char.isdigit():
+                        x += int(char)
+                        i += 1
+                        continue
+                        
+                    is_promoted = False
+                    if char == "+":
+                        is_promoted = True
+                        i += 1
+                        char = row_data[i]
+                        
+                    if x >= BOARD_SIZE: break 
+                    
+                    owner = SENTE if char.isupper() else GOTE
+                    sfen_char = "+" + char.upper() if is_promoted else char.upper()
+                    
+                    name = reverse_map.get(sfen_char)
+                    if not name:
+                         # Fallback for simple chars if + missing in map (though SFEN_MAP has +P etc)
+                         name = reverse_map.get(char.upper())
+
+                    if name:
+                        self.board[y][x] = {"name": name, "owner": owner}
+                    x += 1
+                    i += 1
+            
+            # Parse Turn
+            self.turn = SENTE if turn_str == 'b' else GOTE
+            
+            # Parse Move Count
+            self.move_count = int(move_count_str)
+            
+            # Parse Hands
+            self.hands = {SENTE: {}, GOTE: {}}
+            if hands_str != "-":
+                i = 0
+                while i < len(hands_str):
+                    count = 1
+                    num_str = ""
+                    while i < len(hands_str) and hands_str[i].isdigit():
+                        num_str += hands_str[i]
+                        i += 1
+                    if num_str:
+                        count = int(num_str)
+                    
+                    if i < len(hands_str):
+                        char = hands_str[i]
+                        owner = SENTE if char.isupper() else GOTE
+                        name = reverse_map.get(char.upper())
+                        if name:
+                            # Original names logic
+                            # In hand, pieces are unpromoted usually.
+                            self.hands[owner][name] = self.hands[owner].get(name, 0) + count
+                        i += 1
+
+        except Exception as e:
+            print(f"Error parsing SFEN: {e}")
+            # Fallback to init? Or raise?
+            raise e
 
     def minimax(self, game_state, depth, alpha, beta, maximizing):
         legal_moves = game_state.get_legal_moves(GOTE if maximizing else SENTE)
