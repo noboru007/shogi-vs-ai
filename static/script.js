@@ -10,7 +10,6 @@ let gSenteModel = "gemini-2.5-pro";
 let gGoteModel = "gemini-2.5-pro";
 
 // Session Management (Local Only)
-// We don't really need session ID for server anymore, but keep for headers if needed
 function getSessionId() {
     let sid = localStorage.getItem('shogi_session_id');
     if (!sid) {
@@ -48,6 +47,11 @@ function loadLocalState() {
     return false;
 }
 
+// Direct Cloud Run URL to bypass Firebase Hosting 60s timeout
+const IS_LOCALHOST = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+// Cloud Run URL from logs:
+const CLOUD_RUN_URL = 'https://shogi-api-5hgqbhxnha-uc.a.run.app';
+
 async function apiCall(endpoint, method = 'GET', body = null) {
     const headers = {
         'X-Session-ID': getSessionId()
@@ -59,8 +63,17 @@ async function apiCall(endpoint, method = 'GET', body = null) {
     const options = { method, headers };
     if (body) options.body = JSON.stringify(body);
 
+    let url;
+    if (IS_LOCALHOST) {
+        // Localhost proxy works fine
+        url = endpoint;
+    } else {
+        // Bypass Firebase Hosting proxy (60s limit) by going direct to Cloud Run
+        const cleanEndpoint = endpoint.startsWith('/') ? endpoint.substring(1) : endpoint;
+        url = `${CLOUD_RUN_URL}/${cleanEndpoint}`;
+    }
+
     // Add timestamp to GET to prevent caching
-    let url = endpoint;
     if (method === 'GET') {
         url += (url.includes('?') ? '&' : '?') + 't=' + new Date().getTime();
     }
@@ -75,7 +88,6 @@ async function apiCall(endpoint, method = 'GET', body = null) {
     return response;
 }
 
-// fetchGameState Removed - Stateless
 
 async function startGame(vsCpu) {
     if (gameState && !confirm("新しい対局を始めますか？")) return;
@@ -92,9 +104,32 @@ async function startGame(vsCpu) {
     }
 }
 
+// Helper to toggle thinking indicator
+function setThinking(turn, visible) {
+    const sEl = document.getElementById('sente-thinking');
+    const gEl = document.getElementById('gote-thinking');
+    if (!sEl || !gEl) return;
+
+    // Clear both first if visible is false, or if strictly setting one
+    if (!visible) {
+        sEl.style.display = 'none';
+        gEl.style.display = 'none';
+        return;
+    }
+
+    if (turn === SENTE) {
+        sEl.style.display = 'inline';
+        gEl.style.display = 'none';
+    } else {
+        sEl.style.display = 'none';
+        gEl.style.display = 'inline';
+    }
+}
+
 async function cpuMove() {
     if (!gameState || !gameState.vs_ai) return;
 
+    setThinking(GOTE, true);
     try {
         const response = await apiCall('/api/cpu', 'POST', {
             sfen: gameState.sfen,
@@ -111,6 +146,8 @@ async function cpuMove() {
         }
     } catch (e) {
         console.error("CPU Move Error", e);
+    } finally {
+        setThinking(GOTE, false);
     }
 }
 
@@ -173,8 +210,8 @@ function renderBoard() {
                     piece.style.color = 'red';
                 }
 
-                // Highlight Gote's last moved piece
-                if (gameState.last_move && gameState.last_move.owner === GOTE) {
+                // Highlight last moved piece (Sente or Gote)
+                if (gameState.last_move) {
                     const [lx, ly] = gameState.last_move.to;
                     if (lx === x && ly === y) {
                         piece.style.color = 'red';
@@ -256,249 +293,140 @@ function onHandClick(name) {
 
 async function onBoardClick(x, y) {
     if (gameState.game_over) return;
-    if (gameState.turn !== SENTE && gameState.vs_ai) return;
+    if (gameState.turn !== SENTE && !gameState.ai_vs_ai_mode) return;
 
-    // If nothing selected
-    if (!selected) {
-        const piece = gameState.board[y][x];
-        if (piece && piece.owner === gameState.turn) {
-            selected = { type: 'board', pos: [x, y] };
-            render();
-        }
-        return;
-    }
+    if (selected) {
+        if (selected.type === 'board') {
+            // Move piece
+            const from = selected.pos;
+            const to = [x, y];
 
-    // If hand piece selected -> Drop
-    if (selected.type === 'hand') {
-        const piece = gameState.board[y][x];
-        if (!piece) {
-            // Try drop
-            await makeMove({
+            // Check promotion locally first (optional UI hint)
+            const piece = gameState.board[from[1]][from[0]];
+            const isPromoteZone = (dir) => (dir === SENTE && y <= 2) || (dir === GOTE && y >= 6);
+
+            // Re-implement check_promote API call logic
+            let promote = false;
+            if (piece) {
+                // Quick client check or API check
+                const response = await apiCall('/api/check_promote', 'POST', {
+                    sfen: gameState.sfen,
+                    name: piece.name,
+                    from: from,
+                    to: to
+                });
+                const res = await response.json();
+                if (res.can_promote) {
+                    promote = confirm("成りますか？");
+                }
+            }
+
+            makeMove({
+                type: 'move',
+                from: from,
+                to: to,
+                promote: promote
+            });
+            selected = null;
+
+        } else if (selected.type === 'hand') {
+            // Drop piece
+            makeMove({
                 type: 'drop',
                 name: selected.name,
-                to: [x, y],
-                sfen: gameState.sfen // STATELESS REQUIREMENT
+                to: [x, y]
             });
-        } else {
-            // Change selection if clicking own piece
-            if (piece.owner === gameState.turn) {
-                selected = { type: 'board', pos: [x, y] };
-                render();
-            } else {
-                selected = null;
-                render();
-            }
-        }
-        return;
-    }
-
-    // If board piece selected -> Move
-    if (selected.type === 'board') {
-        const [sx, sy] = selected.pos;
-        if (sx === x && sy === y) {
             selected = null;
-            render();
-            return;
         }
-
+        render();
+    } else {
+        // Select piece
         const piece = gameState.board[y][x];
         if (piece && piece.owner === gameState.turn) {
-            // Change selection
             selected = { type: 'board', pos: [x, y] };
             render();
-            return;
-        }
-
-        // Attempt move
-        const sourcePiece = gameState.board[sy][sx];
-
-        try {
-            const response = await apiCall('/api/check_promote', 'POST', {
-                from: [sx, sy],
-                to: [x, y],
-                name: sourcePiece.name,
-                sfen: gameState.sfen // STATELESS REQUIREMENT
-            });
-            const check = await response.json();
-
-            if (check.can_promote) {
-                showPromotionModal(sx, sy, x, y);
-            } else {
-                await makeMove({
-                    type: 'move',
-                    from: [sx, sy],
-                    to: [x, y],
-                    promote: false,
-                    sfen: gameState.sfen // STATELESS REQUIREMENT
-                });
-            }
-        } catch (e) {
-            console.error("Move Check Error", e);
         }
     }
-}
-
-function showPromotionModal(sx, sy, ex, ey) {
-    let modal = document.getElementById('promotion-modal');
-    if (!modal) {
-        modal = document.createElement('div');
-        modal.id = 'promotion-modal';
-        styleModal(modal); // Helper below or inline
-        // ... simplified creation for brevity ...
-        // Reusing existing DOM if possible or creating simple one
-        document.body.appendChild(modal);
-        // Assuming modal innerHTML is safer to rebuild
-    }
-
-    // Quick rebuild to ensure clean event listeners
-    modal.innerHTML = '';
-
-    const content = document.createElement('div');
-    Object.assign(content.style, {
-        backgroundColor: '#fff', padding: '20px', borderRadius: '5px',
-        textAlign: 'center', boxShadow: '0 2px 10px rgba(0,0,0,0.2)'
-    });
-
-    const text = document.createElement('p');
-    text.textContent = '成りますか？';
-
-    const btnContainer = document.createElement('div');
-    btnContainer.style.display = 'flex';
-    btnContainer.style.gap = '10px';
-    btnContainer.style.justifyContent = 'center';
-
-    const yesBtn = document.createElement('button');
-    yesBtn.textContent = 'はい';
-    yesBtn.onclick = async () => {
-        modal.style.display = 'none';
-        await makeMove({
-            type: 'move', from: [sx, sy], to: [ex, ey], promote: true,
-            sfen: gameState.sfen
-        });
-    };
-
-    const noBtn = document.createElement('button');
-    noBtn.textContent = 'いいえ';
-    noBtn.onclick = async () => {
-        modal.style.display = 'none';
-        await makeMove({
-            type: 'move', from: [sx, sy], to: [ex, ey], promote: false,
-            sfen: gameState.sfen
-        });
-    };
-
-    btnContainer.append(yesBtn, noBtn);
-    content.append(text, btnContainer);
-    modal.append(content);
-
-    modal.style.display = 'flex';
-}
-
-function styleModal(modal) {
-    Object.assign(modal.style, {
-        position: 'fixed', top: '0', left: '0', width: '100%', height: '100%',
-        backgroundColor: 'rgba(0,0,0,0.5)', display: 'none',
-        justifyContent: 'center', alignItems: 'center', zIndex: '1000'
-    });
 }
 
 async function makeMove(moveData) {
     try {
-        // Inject stateless flags
-        if (gameState) {
-            moveData.vs_ai = gameState.vs_ai;
-            moveData.ai_vs_ai = gameState.ai_vs_ai_mode;
-            moveData.sente_model = gSenteModel;
-            moveData.gote_model = gGoteModel;
-        }
-
-        const response = await apiCall('/api/move', 'POST', moveData);
-
+        const payload = { ...moveData, sfen: gameState.sfen, vs_ai: gameState.vs_ai, ai_vs_ai: gameState.ai_vs_ai_mode, sente_model: gSenteModel, gote_model: gGoteModel };
+        const response = await apiCall('/api/move', 'POST', payload);
         const result = await response.json();
+
         if (result.status === 'ok') {
-            selected = null;
             updateGameState(result.game_state);
 
-            // Trigger CPU logic IF vs_ai
-            // But wait, updateGameState already renders.
-            if (gameState.vs_ai && gameState.turn === GOTE && !gameState.game_over) {
-                setTimeout(cpuMove, 300);
+            // Trigger CPU or AI vs AI Loop
+            if (gameState.ai_vs_ai_mode && !gameState.game_over) {
+                setTimeout(processAiVsAi, 500);
+            } else if (gameState.vs_ai && !gameState.game_over && gameState.turn === GOTE) {
+                setTimeout(cpuMove, 500);
             }
         } else {
-            alert(result.message);
-            selected = null;
-            render();
+            console.error(result.message);
+            alert("Move Error: " + result.message);
         }
     } catch (e) {
-        console.error("Make Move Error", e);
-        alert("Move failed: " + e.message);
+        alert("Server Error: " + e.message);
     }
 }
 
-
+// AI Settings UI Helpers
 function showAiSettings() {
-    console.log("DEBUG: showAiSettings clicked");
     const el = document.getElementById('ai-settings');
-    if (el) {
-        el.style.display = 'block';
-        console.log("DEBUG: ai-settings display set to block");
-    } else {
-        console.error("DEBUG: ai-settings element not found");
-    }
+    if (el) el.style.display = 'block';
 }
 
+function hideAiSettings() {
+    const el = document.getElementById('ai-settings');
+    if (el) el.style.display = 'none';
+}
+
+// AI vs AI Loop
 async function startAiVsAiMatch() {
     console.log("DEBUG: startAiVsAiMatch clicked");
+    hideAiSettings();
+    const sModel = document.getElementById('sente-model').value;
+    const gModel = document.getElementById('gote-model').value;
+
+    gSenteModel = sModel;
+    gGoteModel = gModel;
+
+    console.log("DEBUG: Selected Models:", sModel, gModel);
+
+    // Reset Game in AI Mode
     try {
-        const senteModelEl = document.getElementById('sente-model');
-        const goteModelEl = document.getElementById('gote-model');
-
-        if (!senteModelEl || !goteModelEl) {
-            throw new Error("Model select elements not found!");
-        }
-
-        const senteModel = senteModelEl.value;
-        const goteModel = goteModelEl.value;
-
-        console.log("DEBUG: Selected Models:", senteModel, goteModel);
-
-        gSenteModel = senteModel;
-        gGoteModel = goteModel;
-
-        const settingsEl = document.getElementById('ai-settings');
-        if (settingsEl) settingsEl.style.display = 'none';
-
         console.log("DEBUG: Calling /api/reset...");
         const response = await apiCall('/api/reset', 'POST', {
             vs_ai: false,
             ai_vs_ai: true,
-            sente_model: senteModel,
-            gote_model: goteModel
+            sente_model: sModel,
+            gote_model: gModel
         });
         const result = await response.json();
         console.log("DEBUG: Reset Response:", result);
 
-        selected = null;
         updateGameState(result.game_state);
 
-        // Start Loop
         console.log("DEBUG: Starting AI Loop...");
-        processAiVsAi();
+        setTimeout(processAiVsAi, 1000); // Start loop
 
     } catch (e) {
-        console.error("AI Match Start Error (Caught)", e);
-        alert("Failed to start match: " + e.message);
+        console.error("AI vs AI Start Error", e);
+        alert("Failed to start AI match");
     }
 }
 
 async function processAiVsAi() {
-    if (!gameState || gameState.game_over) return;
-    if (!gameState.ai_vs_ai_mode) return; // Safety
-
-    // Safety delay
-    await new Promise(r => setTimeout(r, 1000));
+    if (!gameState || !gameState.ai_vs_ai_mode || gameState.game_over) {
+        console.log("DEBUG: Stopping AI Loop. mode:", gameState.ai_vs_ai_mode, "over:", gameState.game_over);
+        return;
+    }
 
     // Request LLM Move
+    setThinking(gameState.turn, true);
     try {
         console.log("DEBUG: Requesting LLM Move with Models:", gSenteModel, gGoteModel);
         const response = await apiCall('/api/llm_move', 'POST', {
@@ -510,40 +438,61 @@ async function processAiVsAi() {
             ai_vs_ai: gameState.ai_vs_ai_mode
         });
         const result = await response.json();
-        if (result.status !== 'ok') {
-            console.error("LLM Error:", result.message);
-            // Retry could happen here?
-            return;
-        }
 
-        const usi = result.usi;
-        console.log("LLM Move Executed:", usi, result.move);
+        console.log("DEBUG: LLM Move Result:", result);
 
-        if (result.game_state) {
-            console.log("DEBUG: Received SFEN:", result.game_state.sfen);
-            console.log("DEBUG: Current Local SFEN:", gameState.sfen);
-
+        if (result.status === 'ok') {
             updateGameState(result.game_state);
 
-            console.log("DEBUG: Updated Local SFEN:", gameState.sfen);
+            // Show Reasoning
+            const rArea = document.getElementById('reasoning-area');
+            if (rArea) {
+                if (result.reasoning || result.move_str_ja) {
+                    rArea.style.display = 'block';
+                    const entry = document.createElement('div');
+                    entry.style.borderBottom = "1px solid #eee";
+                    entry.style.marginBottom = "5px";
+                    entry.style.paddingBottom = "5px";
 
-            // Continue loop if not game over
-            if (!gameState.game_over) {
-                processAiVsAi(); // Recursion
-            } else {
-                setTimeout(() => alert("Game Over! Winner: " + result.winner), 500);
+                    const moveNum = result.move_count ? `[#${result.move_count}]` : "";
+                    const mStr = result.move_str_ja || result.usi || "";
+                    const model = result.model || "AI";
+
+                    // Format: [#15] (Model) 7六歩: Reasoning...
+                    // entry.textContent = `${moveNum} (${model}) ${mStr}: ${result.reasoning}`;
+
+                    const meta = document.createElement('span');
+                    meta.textContent = `${moveNum} (${model}) `;
+                    entry.appendChild(meta);
+
+                    const moveBold = document.createElement('strong');
+                    moveBold.textContent = `${mStr}: `;
+                    entry.appendChild(moveBold);
+
+                    const reasonText = document.createTextNode(result.reasoning);
+                    entry.appendChild(reasonText);
+
+                    rArea.insertBefore(entry, rArea.firstChild);
+                }
             }
+
+            // Loop continue
+            if (!result.game_over && gameState.ai_vs_ai_mode) {
+                setTimeout(processAiVsAi, 1000);
+            }
+        } else {
+            console.error("LLM Error:", result.message, result.last_error);
         }
 
     } catch (e) {
         console.error("AI processing error", e);
+    } finally {
+        setThinking(gameState.turn, false);
     }
 }
 
-// Initial Load logic
-// Must happen after DOM ready ideally, but script.js is likely at end of body or deferred.
-// Try load local state, if fail/empty, start new game (vs AI default)
-if (!loadLocalState()) {
-    // Start default game
-    startGame(true);
-}
+
+// Initialization
+window.onload = () => {
+    loadLocalState();
+};

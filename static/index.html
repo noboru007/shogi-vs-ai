@@ -12,7 +12,8 @@
     <div class="container">
         <div class="game-area">
             <div id="gote-hand" class="hand-area">
-                <div class="hand-label">[後手持駒]</div>
+                <div class="hand-label">[後手持駒] <span id="gote-thinking" class="thinking-label"
+                        style="display:none;">(考え中...)</span></div>
                 <div class="hand-pieces" id="gote-hand-pieces"></div>
             </div>
 
@@ -21,12 +22,14 @@
             </div>
 
             <div id="sente-hand" class="hand-area">
-                <div class="hand-label">[先手持駒 (クリックで選択)]</div>
+                <div class="hand-label">[先手持駒 (クリックで選択)] <span id="sente-thinking" class="thinking-label"
+                        style="display:none;">(考え中...)</span></div>
                 <div class="hand-pieces" id="sente-hand-pieces"></div>
             </div>
 
             <div class="status-area">
                 <div id="turn-indicator">手番: 先手 (下)</div>
+                <div id="reasoning-area" style="display:none;"></div> <!-- AI Reason Box -->
                 <div id="game-controls">
                     <button onclick="startGame(true)">CPUと対局</button>
                     <button onclick="startGame(false)">人間同士で対局</button>
@@ -43,8 +46,14 @@
                         <option value="gemini-3-pro-preview">Gemini 3 Pro Preview</option>
                         <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
                         <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-                        <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash-Lite</option>
                         <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+                        <option value="gpt-5.1-codex-max">GPT-5.1 Codex Max</option>
+                        <option value="gpt-5.1-codex">GPT-5.1 Codex</option>
+                        <option value="gpt-5.1">GPT-5.1</option>
+                        <option value="gpt-5-pro">GPT-5 Pro</option>
+                        <option value="gpt-5">GPT-5</option>
+                        <option value="gpt-5-mini">GPT-5 Mini</option>
+                        <option value="gpt-4o">GPT-4o</option>
                     </select>
                 </div>
                 <div>
@@ -52,9 +61,15 @@
                     <select id="gote-model">
                         <option value="gemini-3-pro-preview">Gemini 3 Pro Preview</option>
                         <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
-                        <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
                         <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash-Lite</option>
                         <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+                        <option value="gpt-5.1-codex-max">GPT-5.1 Codex Max</option>
+                        <option value="gpt-5.1-codex">GPT-5.1 Codex</option>
+                        <option value="gpt-5.1">GPT-5.1</option>
+                        <option value="gpt-5-pro">GPT-5 Pro</option>
+                        <option value="gpt-5">GPT-5</option>
+                        <option value="gpt-5-mini">GPT-5 Mini</option>
+                        <option value="gpt-4o">GPT-4o</option>
                     </select>
                 </div>
                 <button onclick="startAiVsAiMatch()">対局開始</button>

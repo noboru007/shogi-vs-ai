@@ -3,3 +3,5 @@ python-dotenv
 google-generativeai
 firebase-functions
 firebase-admin
+flask-cors
+openai

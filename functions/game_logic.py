@@ -213,6 +213,12 @@ class ShogiGame:
         
         return res
 
+    def get_random_move(self):
+        moves = self.get_legal_moves(self.turn)
+        if moves:
+            return random.choice(moves)
+        return None
+
     def apply_move_internal(self, move_type, start_or_name, end, owner, promote, board_ref):
         ex, ey = end
         if move_type == "move":
@@ -232,6 +238,46 @@ class ShogiGame:
         if self.is_king_in_check(owner):
             return False
         return True
+
+    def is_physically_possible(self, move_type, start_or_name, end, owner, promote=False):
+        ex, ey = end
+        if move_type == "move":
+            sx, sy = start_or_name
+            # 1. Piece must exist at source
+            piece = self.board[sy][sx]
+            if piece is None or piece["owner"] != owner: return False
+            
+            # 2. Destination must not be friendly
+            target = self.board[ey][ex]
+            if target and target["owner"] == owner: return False
+            
+            # 3. Piece movement geometry check
+            if not self.is_pseudo_valid_move(start_or_name, end, piece, owner):
+                return False
+                
+            # 4. Stuck check (Immobile piece)
+            if not promote and self.is_stuck(ex, ey, piece["name"], owner):
+                return False
+                
+            return True
+            
+        elif move_type == "drop":
+            name = start_or_name
+            # 1. Must have piece in hand
+            if self.hands[owner].get(name, 0) <= 0: return False
+            
+            # 2. Destination must be empty
+            if self.board[ey][ex] is not None: return False
+            
+            # 3. Stuck check
+            if self.is_stuck(ex, ey, name, owner): return False
+            
+            # 4. Nifu check
+            if name == "歩" and self.has_nifu(ex, owner): return False
+            
+            return True
+            
+        return False
 
     def make_move(self, move_type, start_or_name, end, owner, promote=False):
         ex, ey = end
