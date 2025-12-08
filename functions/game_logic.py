@@ -335,12 +335,52 @@ class ShogiGame:
                 p = self.board[y][x]
                 if p:
                     val = PIECE_VALUES.get(p["name"], 0)
-                    if p["owner"] == GOTE: score += val
-                    else: score -= val
+                    
+                    # Position Bonus: Advance towards enemy
+                    # Sente (1) wants y -> 0. Gote (-1) wants y -> 8.
+                    # Simple bonus: 5 points per rank advanced
+                    pos_bonus = 0
+                    if p["owner"] == SENTE:
+                         pos_bonus = (8 - y) * 5
+                    else: # GOTE
+                         pos_bonus = y * 5
+                         
+                    if p["owner"] == GOTE: score += (val + pos_bonus)
+                    else: score -= (val + pos_bonus)
+        
+        # King Safety (Simplified)
+        # Bonus for defenders around the King
+        for owner in [SENTE, GOTE]:
+            k_pos = self.find_king(owner)
+            if k_pos:
+                kx, ky = k_pos
+                safety_score = 0
+                # Check 3x3 area around King
+                for dy in [-1, 0, 1]:
+                    for dx in [-1, 0, 1]:
+                        if dx == 0 and dy == 0: continue
+                        tx, ty = kx + dx, ky + dy
+                        if 0 <= tx < BOARD_SIZE and 0 <= ty < BOARD_SIZE:
+                            tp = self.board[ty][tx]
+                            if tp and tp["owner"] == owner:
+                                # Friendly piece near King -> Good defender
+                                if tp["name"] in ["金", "銀", "香", "馬", "竜"]:
+                                     safety_score += 200 # Significant bonus
+                                else:
+                                     safety_score += 50 # Minor bonus
+                
+                if owner == GOTE: score += safety_score
+                else: score -= safety_score
+
+        # Hand Valuation: 1.4x to discourage reckless drops
+        # Holding a piece is potential power. Dropping it loses that flexibility.
+        hand_multiplier = 1.4
+        
         for name, count in self.hands[GOTE].items():
-            score += PIECE_VALUES.get(name, 0) * count * 1.1 
+            score += PIECE_VALUES.get(name, 0) * count * hand_multiplier
         for name, count in self.hands[SENTE].items():
-            score -= PIECE_VALUES.get(name, 0) * count * 1.1
+            score -= PIECE_VALUES.get(name, 0) * count * hand_multiplier
+            
         return score
 
     # === JSON Serialization for Firestore ===
@@ -501,8 +541,35 @@ class ShogiGame:
 
     def minimax(self, game_state, depth, alpha, beta, maximizing):
         legal_moves = game_state.get_legal_moves(GOTE if maximizing else SENTE)
-        if depth == 0 or not legal_moves:
-            return game_state.evaluate_board(), None
+        
+        # Base Case with Check Extension
+        if depth <= 0:
+            current_turn = GOTE if maximizing else SENTE
+            # If in check at depth 0, extend search by 1 ply to see resolution
+            # Limit extension to avoid infinite recursion (depth -1 means already extended?)
+            # Simplified: Allow finding a move to escape check.
+            is_in_check = game_state.is_king_in_check(current_turn)
+            
+            # Note: valid moves usually handle escape. 
+            # If legal_moves is empty => Mate. evaluate_board doesn't know mate.
+            if not legal_moves:
+                # Mate detection
+                return (-99999 if maximizing else 99999), None
+                
+            if not is_in_check:
+                return game_state.evaluate_board(), None
+            else:
+                # Extend 1 ply for check resolution
+                # To prevent infinite depth, we treat depth 0 as "check extension allowed"
+                # and depth -1 as "stop".
+                if depth == 0:
+                     depth = 1 # Extend!
+                else: 
+                     return game_state.evaluate_board(), None
+
+        # Sort moves for Alpha-Beta pruning efficiency
+        # Heuristic: Captures first?
+        # For now, simple shuffle is okay, or sort by standard eval? 
         random.shuffle(legal_moves)
         best_move = None
         if maximizing: 

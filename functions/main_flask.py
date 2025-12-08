@@ -169,6 +169,11 @@ def make_move():
                     break
         
         if legal:
+            # Generate JP string BEFORE making move
+            move_dict = {'type': 'move', 'from': start, 'to': end, 'promote': promote}
+            move_str_ja = get_japanese_move_str(game, move_dict)
+            current_move_count = game.move_count
+
             game.make_move('move', start, end, game.turn, promote)
             game.switch_turn()
             
@@ -177,7 +182,9 @@ def make_move():
             
             return jsonify({
                 'status': 'ok', 
-                'game_state': get_full_state(game, ai_settings=req_data) 
+                'game_state': get_full_state(game, ai_settings=req_data),
+                'move_str_ja': move_str_ja,
+                'move_count': current_move_count
             })
             
     elif move_type == 'drop':
@@ -191,6 +198,11 @@ def make_move():
                 break
                 
         if legal:
+            # Generate JP string BEFORE making move
+            move_dict = {'type': 'drop', 'name': name, 'to': to_pos}
+            move_str_ja = get_japanese_move_str(game, move_dict)
+            current_move_count = game.move_count
+
             game.make_move('drop', name, to_pos, game.turn)
             game.switch_turn()
             
@@ -199,7 +211,9 @@ def make_move():
 
             return jsonify({
                 'status': 'ok', 
-                'game_state': get_full_state(game, ai_settings=req_data) 
+                'game_state': get_full_state(game, ai_settings=req_data),
+                'move_str_ja': move_str_ja,
+                'move_count': current_move_count
             })
         else:
              kanji_name = name 
@@ -362,21 +376,39 @@ def llm_move():
         
         turn_str = '先手 (Sente)' if turn == SENTE else '後手 (Gote)'
         
-        base_prompt = f"""
+        piece_guide = ""
+        if turn == SENTE:
+             piece_guide = "あなたの駒はSFEN上で大文字(P, L, N, S, G, B, R, K)で表されます。\n        相手の駒は小文字です。\n        あなたは盤面下側(Rank 9)から上方向(Rank 1)に向かって攻めます。"
+        else:
+             piece_guide = "あなたの駒はSFEN上で小文字(p, l, n, s, g, b, r, k)で表されます。\n        相手の駒は大文字です。\n        あなたは盤面上側(Rank 1)から下方向(Rank 9)に向かって攻めます。"
+
+        # === Construct Prompts ===
+        
+        # System Prompt: Role, Rules, Format
+        system_prompt = f"""
         あなたは最強のAI将棋棋士です。
-        現在の局面(SFEN): {sfen}
-        あなたの手番: {turn_str}。
-        あなたの持ち駒: {hand_desc}
-        
-        まず初めに、SFENを正確に解析して、その局面を基に思考してください。
-        この局面におけるベストな次の一手を選び、将棋のUSI形式（例：7g7f）で回答してください。
-        持ち駒以外の駒（相手の持ち駒など）は使えません。
-        また、その手を選択した理由を日本語で簡潔に述べて下さい（Reasoning）
-        
+        {piece_guide}
+
+        ルール:
+        1. SFENを正確に解析して、あなたの駒と相手の駒を正確に把握すること。
+        2. 自分の駒以外の駒（相手の駒）は動かせない。
+        3. 持ち駒以外の駒も勝手に使えない。
+        4. 回答は必ず指定されたフォーマットのみを出力すること。余計な挨拶は不要。
+
         回答フォーマット:
         Reasoning: [3行以内の簡潔な説明]
         Move: [USI Move]（例：7g7f。持ち駒がない場合は打てません）
         """
+
+        # User Prompt: Current State
+        user_prompt = f"""
+        現在の局面(SFEN): {sfen}
+        あなたの手番: {turn_str}。
+        あなたの持ち駒: {hand_desc}
+        
+        この局面におけるベストな次の一手を選び、将棋のUSI形式（例：7776ではなく7g7f）で回答してください。
+        """
+        
         # Configure Gemini
         import google.generativeai as genai
         
@@ -391,14 +423,12 @@ def llm_move():
         last_error = ""
 
         for attempt in range(max_retries):
-            # No legal moves list in prompt as requested
-            prompt = base_prompt
+            # Combined prompt for fallback or non-separated models (though we will use separation where possible)
+            current_user_prompt = user_prompt
             if last_error:
-                 prompt += f"\n\n前回の回答エラー: {last_error}\nもう一度正しい手を選んでください。"
+                 current_user_prompt += f"\n\n前回の回答エラー: {last_error}\nもう一度正しい手を選んでください。"
             
-            # log_info(f"DEBUG: Sending Prompt (Attempt {attempt+1})...")
-            # log_info(f"DEBUG: Prompt: {prompt}")
-            log_info(f"DEBUG: Turn: {turn}, SFEN Prompt: {sfen}")
+            log_info(f"DEBUG: Turn: {turn}, SFEN: {sfen}")
             
             text = ""
             try:
@@ -418,8 +448,8 @@ def llm_move():
                         payload = {
                             "model": model_name,
                             "input": [
-                                {"role": "system", "content": "You are a professional Shogi AI."},
-                                {"role": "user", "content": prompt}
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": current_user_prompt}
                             ],
                             "temperature": 1 # Default for pro/reasoning models
                         }
@@ -520,8 +550,8 @@ def llm_move():
                         response = openai_client.chat.completions.create(
                             model=model_name,
                             messages=[
-                                {"role": "system", "content": "You are a professional Shogi AI."},
-                                {"role": "user", "content": prompt}
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": current_user_prompt}
                             ],
                             temperature=temp
                         )
@@ -530,12 +560,14 @@ def llm_move():
                 else:
                     # Gemini Call
                     log_info("DEBUG: Configuring Gemini Model...")
-                    model = genai.GenerativeModel(model_name)
+                    model = genai.GenerativeModel(
+                        model_name,
+                        system_instruction=system_prompt
+                    )
                     chat = model.start_chat(history=[])
                     
-                    
                     try:
-                        response = chat.send_message(prompt)
+                        response = chat.send_message(current_user_prompt)
                         text = response.text
                     except Exception as e:
                         # Handle safety blocks or other non-text responses

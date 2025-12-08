@@ -31,15 +31,13 @@
                 <div id="turn-indicator">手番: 先手 (下)</div>
                 <div id="reasoning-area" style="display:none;"></div> <!-- AI Reason Box -->
                 <div id="game-controls">
-                    <button onclick="startGame(true)">CPUと対局</button>
-                    <button onclick="startGame(false)">人間同士で対局</button>
-                    <button onclick="showAiSettings()">AI vs AI (LLM)</button>
+                    <button onclick="showAiSettings()">対局設定 (Game Settings)</button>
                 </div>
             </div>
 
             <div id="ai-settings"
                 style="display: none; padding: 10px; background: #fffbe6; border: 1px solid #ccc; margin-bottom: 10px;">
-                <h3>AI vs AI 設定</h3>
+                <h3>対局設定</h3>
                 <div>
                     <label>先手：</label>
                     <select id="sente-model">
@@ -54,6 +52,8 @@
                         <option value="gpt-5">GPT-5</option>
                         <option value="gpt-5-mini">GPT-5 Mini</option>
                         <option value="gpt-4o">GPT-4o</option>
+                        <option value="human" selected>人間</option>
+                        <option value="cpu">6手先まで読むCPU</option>
                     </select>
                 </div>
                 <div>
@@ -70,6 +70,8 @@
                         <option value="gpt-5">GPT-5</option>
                         <option value="gpt-5-mini">GPT-5 Mini</option>
                         <option value="gpt-4o">GPT-4o</option>
+                        <option value="human">人間</option>
+                        <option value="cpu">6手先まで読むCPU</option>
                     </select>
                 </div>
                 <button onclick="startAiVsAiMatch()">対局開始</button>

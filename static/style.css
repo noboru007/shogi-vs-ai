@@ -301,6 +301,30 @@ body {
         font-size: 16px;
         /* Smaller font on mobile */
     }
+
+    /* Mobile Spacing Optimizations */
+    .container {
+        padding: 10px;
+    }
+
+    .hand-area {
+        margin: 2px 0;
+        min-height: 60px;
+        /* Compress height slightly */
+    }
+
+    .status-area {
+        margin-top: 10px;
+    }
+
+    .sfen-area {
+        margin-top: 10px;
+    }
+
+    .hand-label {
+        margin-bottom: 2px;
+        font-size: 12px;
+    }
 }
 
 .cell.selected {

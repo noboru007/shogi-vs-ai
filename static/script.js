@@ -4,6 +4,39 @@ const GOTE = -1;
 
 console.log("SCRIPT LOADED vdebug3");
 
+// Helper to log moves
+function logMove(moveCount, modelName, moveStr, reasoning = null) {
+    const rArea = document.getElementById('reasoning-area');
+    if (!rArea) return;
+
+    // Always show if it's hidden
+    rArea.style.display = 'block';
+
+    const entry = document.createElement('div');
+    entry.style.borderBottom = "1px solid #eee";
+    entry.style.marginBottom = "5px";
+    entry.style.paddingBottom = "5px";
+
+    const moveNum = moveCount ? `[#${moveCount}]` : "";
+    const mStr = moveStr || "";
+    const model = modelName || "Unknown";
+
+    const meta = document.createElement('span');
+    meta.textContent = `${moveNum} (${model}) `;
+    entry.appendChild(meta);
+
+    const moveBold = document.createElement('strong');
+    moveBold.textContent = `${mStr}: `;
+    entry.appendChild(moveBold);
+
+    if (reasoning) {
+        const reasonText = document.createTextNode(reasoning);
+        entry.appendChild(reasonText);
+    }
+
+    rArea.insertBefore(entry, rArea.firstChild);
+}
+
 let gameState = null;
 let selected = null; // {type: 'board', pos: [x, y]} or {type: 'hand', name: 'PieceName'}
 let gSenteModel = "gemini-2.5-pro";
@@ -105,7 +138,8 @@ async function startGame(vsCpu) {
 }
 
 // Helper to toggle thinking indicator
-function setThinking(turn, visible) {
+// Helper to toggle thinking indicator
+function setThinking(turn, visible, modelName = null) {
     const sEl = document.getElementById('sente-thinking');
     const gEl = document.getElementById('gote-thinking');
     if (!sEl || !gEl) return;
@@ -117,19 +151,23 @@ function setThinking(turn, visible) {
         return;
     }
 
+    const text = modelName ? `(${modelName} 考え中...)` : "(考え中...)";
+
     if (turn === SENTE) {
+        sEl.textContent = text;
         sEl.style.display = 'inline';
         gEl.style.display = 'none';
     } else {
+        gEl.textContent = text;
         sEl.style.display = 'none';
         gEl.style.display = 'inline';
     }
 }
 
 async function cpuMove() {
-    if (!gameState || !gameState.vs_ai) return;
+    if (!gameState || (!gameState.vs_ai && !gameState.ai_vs_ai_mode)) return;
 
-    setThinking(GOTE, true);
+    setThinking(GOTE, true, 'CPU');
     try {
         const response = await apiCall('/api/cpu', 'POST', {
             sfen: gameState.sfen,
@@ -141,6 +179,10 @@ async function cpuMove() {
         const result = await response.json();
         if (result.status === 'ok') {
             updateGameState(result.game_state);
+            // Log CPU Move
+            if (result.move_str_ja) {
+                logMove(result.move_count, 'CPU', result.move_str_ja, result.reasoning);
+            }
         } else {
             console.error(result.message);
         }
@@ -283,6 +325,12 @@ function onHandClick(name) {
     if (gameState.game_over) return;
     if (gameState.turn !== SENTE && !gameState.ai_vs_ai_mode) return;
 
+    // In AI/Mixed mode, prevent human from moving if it's not their turn (i.e. model is not 'human')
+    if (gameState.ai_vs_ai_mode) {
+        const currentModel = (gameState.turn === SENTE) ? gSenteModel : gGoteModel;
+        if (currentModel !== 'human') return;
+    }
+
     if (selected && selected.type === 'hand' && selected.name === name) {
         selected = null;
     } else {
@@ -294,6 +342,12 @@ function onHandClick(name) {
 async function onBoardClick(x, y) {
     if (gameState.game_over) return;
     if (gameState.turn !== SENTE && !gameState.ai_vs_ai_mode) return;
+
+    // In AI/Mixed mode, prevent human from moving if it's not their turn
+    if (gameState.ai_vs_ai_mode) {
+        const currentModel = (gameState.turn === SENTE) ? gSenteModel : gGoteModel;
+        if (currentModel !== 'human') return;
+    }
 
     if (selected) {
         if (selected.type === 'board') {
@@ -358,6 +412,15 @@ async function makeMove(moveData) {
         if (result.status === 'ok') {
             updateGameState(result.game_state);
 
+            // Log Human Move
+            // If makeMove was successful and we have move_str_ja, log it.
+            // Human turn is implicitly handled here.
+            // But we need to check if it WAS a human turn? 
+            // Yes, makeMove is called by UI interaction.
+            if (result.move_str_ja) {
+                logMove(result.move_count, '人間', result.move_str_ja);
+            }
+
             // Trigger CPU or AI vs AI Loop
             if (gameState.ai_vs_ai_mode && !gameState.game_over) {
                 setTimeout(processAiVsAi, 500);
@@ -372,6 +435,8 @@ async function makeMove(moveData) {
         alert("Server Error: " + e.message);
     }
 }
+
+
 
 // AI Settings UI Helpers
 function showAiSettings() {
@@ -396,11 +461,28 @@ async function startAiVsAiMatch() {
 
     console.log("DEBUG: Selected Models:", sModel, gModel);
 
-    // Reset Game in AI Mode
+    // Check if Human vs Human (Legacy Mode)
+    if (sModel === 'human' && gModel === 'human') {
+        console.log("DEBUG: Human vs Human detected.");
+        try {
+            const response = await apiCall('/api/reset', 'POST', {
+                vs_ai: false,
+                ai_vs_ai: false
+            });
+            const result = await response.json();
+            updateGameState(result.game_state);
+        } catch (e) {
+            console.error("Game Start Error", e);
+            alert("Start Failed");
+        }
+        return;
+    }
+
+    // AI or Mixed Mode
     try {
-        console.log("DEBUG: Calling /api/reset...");
+        console.log("DEBUG: Calling /api/reset for AI/Mixed Mode...");
         const response = await apiCall('/api/reset', 'POST', {
-            vs_ai: false,
+            vs_ai: false, // We use ai_vs_ai flags for flexible turns
             ai_vs_ai: true,
             sente_model: sModel,
             gote_model: gModel
@@ -421,12 +503,33 @@ async function startAiVsAiMatch() {
 
 async function processAiVsAi() {
     if (!gameState || !gameState.ai_vs_ai_mode || gameState.game_over) {
-        console.log("DEBUG: Stopping AI Loop. mode:", gameState.ai_vs_ai_mode, "over:", gameState.game_over);
+        // console.log("DEBUG: Stopping AI Loop. mode:", gameState.ai_vs_ai_mode, "over:", gameState.game_over);
         return;
     }
 
-    // Request LLM Move
-    setThinking(gameState.turn, true);
+    const currentModel = (gameState.turn === SENTE) ? gSenteModel : gGoteModel;
+
+    // 1. Human Turn -> Wait (Return)
+    if (currentModel === 'human') {
+        console.log("DEBUG: Human turn. Waiting for input.");
+        return;
+    }
+
+    // 2. CPU Turn -> Call CPU (Reusing cpuMove logic somewhat or just direct API)
+    if (currentModel === 'cpu') {
+        console.log("DEBUG: CPU Turn");
+        await cpuMove();
+        // cpuMove logic calls updateGameState.
+        // We need to ensure the loop continues after CPU moves.
+        // cpuMove is async and updates state. We should schedule next poll.
+        if (!gameState.game_over) {
+            setTimeout(processAiVsAi, 1000);
+        }
+        return;
+    }
+
+    // 3. LLM Turn
+    setThinking(gameState.turn, true, currentModel);
     try {
         console.log("DEBUG: Requesting LLM Move with Models:", gSenteModel, gGoteModel);
         const response = await apiCall('/api/llm_move', 'POST', {
@@ -445,35 +548,10 @@ async function processAiVsAi() {
             updateGameState(result.game_state);
 
             // Show Reasoning
-            const rArea = document.getElementById('reasoning-area');
-            if (rArea) {
-                if (result.reasoning || result.move_str_ja) {
-                    rArea.style.display = 'block';
-                    const entry = document.createElement('div');
-                    entry.style.borderBottom = "1px solid #eee";
-                    entry.style.marginBottom = "5px";
-                    entry.style.paddingBottom = "5px";
-
-                    const moveNum = result.move_count ? `[#${result.move_count}]` : "";
-                    const mStr = result.move_str_ja || result.usi || "";
-                    const model = result.model || "AI";
-
-                    // Format: [#15] (Model) 7六歩: Reasoning...
-                    // entry.textContent = `${moveNum} (${model}) ${mStr}: ${result.reasoning}`;
-
-                    const meta = document.createElement('span');
-                    meta.textContent = `${moveNum} (${model}) `;
-                    entry.appendChild(meta);
-
-                    const moveBold = document.createElement('strong');
-                    moveBold.textContent = `${mStr}: `;
-                    entry.appendChild(moveBold);
-
-                    const reasonText = document.createTextNode(result.reasoning);
-                    entry.appendChild(reasonText);
-
-                    rArea.insertBefore(entry, rArea.firstChild);
-                }
+            if (result.reasoning || result.move_str_ja) {
+                const mStr = result.move_str_ja || result.usi || "";
+                const model = result.model || "AI";
+                logMove(result.move_count, model, mStr, result.reasoning);
             }
 
             // Loop continue
