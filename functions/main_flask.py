@@ -272,17 +272,21 @@ def cpu_move():
     if game.game_over or (game.vs_ai and game.turn != GOTE):
         return jsonify({'status': 'error', 'message': 'Not CPU turn'}), 400
         
+    # Determine if maximizing (Gote) or minimizing (Sente)
+    # minimax is designed such that True = Gote (Maximize), False = Sente (Minimize)
+    is_maximizing = (game.turn == GOTE)
+    
     try:
-        best_val, best_move = game.minimax(game, CPU_DEPTH, -float('inf'), float('inf'), True)
+        best_val, best_move = game.minimax(game, CPU_DEPTH, -float('inf'), float('inf'), is_maximizing)
         if best_move:
             # Generate JP string BEFORE making move (to see source piece)
             move_str_ja = get_japanese_move_str(game, best_move)
             current_move_count = game.move_count
             
             if best_move["type"] == "move":
-                game.make_move("move", best_move["from"], best_move["to"], GOTE, best_move["promote"])
+                game.make_move("move", best_move["from"], best_move["to"], game.turn, best_move["promote"])
             else:
-                game.make_move("drop", best_move["name"], best_move["to"], GOTE)
+                game.make_move("drop", best_move["name"], best_move["to"], game.turn)
             
             game.switch_turn()
             if len(game.get_legal_moves(game.turn)) == 0:
@@ -419,7 +423,13 @@ def llm_move():
         if openai_api_key:
             openai_client = OpenAI(api_key=openai_api_key)
             
-        max_retries = 1 
+        max_retries_raw = data.get('max_retries', 2)
+        try:
+            max_retries = int(max_retries_raw)
+            if max_retries < 1: max_retries = 1
+            if max_retries > 3: max_retries = 3
+        except:
+            max_retries = 2 
         last_error = ""
 
         for attempt in range(max_retries):
@@ -428,7 +438,7 @@ def llm_move():
             if last_error:
                  current_user_prompt += f"\n\n前回の回答エラー: {last_error}\nもう一度正しい手を選んでください。"
             
-            log_info(f"DEBUG: Turn: {turn}, SFEN: {sfen}")
+            log_info(f"DEBUG: Turn: {turn_str}, SFEN: {sfen}")
             
             text = ""
             try:
@@ -436,7 +446,7 @@ def llm_move():
                     if not openai_client:
                         raise Exception("OpenAI API Key not set")
                         
-                    log_info(f"DEBUG: Calling OpenAI API with {model_name}...")
+                    # log_info(f"DEBUG: Calling OpenAI API with {model_name}...")
                     
                     if model_name == "gpt-5-pro" or "codex" in model_name:
                         # Special handling for gpt-5-pro (v1/responses)
@@ -462,7 +472,7 @@ def llm_move():
                         
                         # Debug log to verify deployment
                         # Debug log to verify deployment and structure
-                        log_info(f"DEBUG: Deployment 88 - v1/responses keys: {list(resp_json.keys())}")
+                        log_info(f"DEBUG: Deployment 11 - v1/responses keys: {list(resp_json.keys())}")
                         
                         # Handle async/polling if result is not immediate
                         # Modified condition to be more explicit about 'reasoning' type
@@ -538,7 +548,7 @@ def llm_move():
                             # Fallback if schema is different
                             text = str(resp_json)
 
-                        log_info(f"DEBUG: OpenAI Response len: {len(text)}")
+                        log_info(f"DEBUG: {model_name} Response len: {len(text)}")
                     
                     else:
                         # Standard v1/chat/completions
@@ -600,7 +610,7 @@ def llm_move():
 
                 if move_match:
                     usi_move = move_match.group(1).strip().strip("`'\"")
-                    log_info(f"DEBUG: Parsed USI: {usi_move}, Reasoning: {reasoning}")
+                    # log_info(f"DEBUG: Parsed USI: {usi_move}, Reasoning: {reasoning}")
                     try:
                         parsed_move = parse_usi_string(usi_move)
                     except:
@@ -641,26 +651,10 @@ def llm_move():
                     game.switch_turn()
                     log_info(f"DEBUG: Post-Move SFEN: {game.get_sfen()}")
                 else:
-                    # 3. Fallback to CPU Logic (Called if no match OR if match invalid)
-                    log_info("DEBUG: Fallback to CPU Logic")
-                    best_move = game.get_random_move() # Simple fallback
-                    if best_move:
-                         move_str_ja = get_japanese_move_str(game, best_move)
-                         
-                         move_type = best_move['type']
-                         start_or_name = best_move['from'] if move_type == 'move' else best_move['name']
-                         end = best_move['to']
-                         promote = best_move.get('promote', False)
-                         
-                         game.make_move(move_type, start_or_name, end, turn, promote)
-                         game.switch_turn()
-                         
-                         usi_move = "CPU_FALLBACK" 
-                         reasoning += " (AIが指せない手を提案したので、AI思考を無視してランダムな手を指しました)"
-                         log_info(f"DEBUG: CPU Fallback Executed")
-                         
-                         # Construct parsed_move for response if possible
-                         parsed_move = best_move
+                    # 3. Invalid Move or No Move -> Retry
+                    log_info("DEBUG: Invalid move or no move found. Retrying...")
+                    last_error = f"Invalid/Illegal move received: {usi_move}. Reasoning: {reasoning}"
+                    continue
 
                 winner = None
                 if len(game.get_legal_moves(game.turn)) == 0:
@@ -682,10 +676,44 @@ def llm_move():
 
             except Exception as e:
                 log_error(f"ERROR inside attempt loop: {e}")
-                return jsonify({'status': 'error', 'message': str(e)}), 500
+                last_error = str(e)
+                continue # Retry
 
-        log_error(f"ERROR: Max retries reached. Last Error: {last_error}")
-        return jsonify({'status': 'error', 'message': 'LLM failed to produce a valid move.', 'last_error': last_error, 'raw': text}), 500
+        log_error(f"ERROR: Max retries reached. Last Error: {last_error}. Switching to CPU Fallback.")
+        
+        # CPU Fallback Logic (Duplicate of logic above)
+        best_move = game.get_random_move()
+        move_str_ja = ""
+        current_move_count = game.move_count
+        parsed_move = None
+        usi_move = "CPU_FALLBACK_ERROR"
+        reasoning = f"(エラーが発生したため、CPUが代打ちしました: {last_error})"
+
+        if best_move:
+             move_str_ja = get_japanese_move_str(game, best_move)
+             move_type = best_move['type']
+             start_or_name = best_move['from'] if move_type == 'move' else best_move['name']
+             end = best_move['to']
+             promote = best_move.get('promote', False)
+             
+             game.make_move(move_type, start_or_name, end, turn, promote)
+             game.switch_turn()
+             parsed_move = best_move
+             
+        if len(game.get_legal_moves(game.turn)) == 0:
+             game.game_over = True
+             
+        response_data = {
+            'status': 'ok',
+            'move': parsed_move, 
+            'usi': usi_move,
+            'move_str_ja': move_str_ja,
+            'move_count': current_move_count,
+            'reasoning': reasoning, 
+            'model': f"{model_name} (Fallback)",
+            'game_state': get_full_state(game, {'ai_vs_ai_mode': ai_vs_ai_mode, 'sente_model': sente_model, 'gote_model': gote_model})
+        }
+        return jsonify(response_data)
 
     except Exception as e:
         log_error(f"CRITICAL ERROR in llm_move: {e}")

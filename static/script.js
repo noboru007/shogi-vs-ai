@@ -39,8 +39,11 @@ function logMove(moveCount, modelName, moveStr, reasoning = null) {
 
 let gameState = null;
 let selected = null; // {type: 'board', pos: [x, y]} or {type: 'hand', name: 'PieceName'}
+let pendingMove = null; // Store move waiting for promotion confirmation
 let gSenteModel = "gemini-2.5-pro";
 let gGoteModel = "gemini-2.5-pro";
+let gMaxRetries = 2;
+let currentMatchId = null; // To prevent stale AI responses from overwriting new game
 
 // Session Management (Local Only)
 function getSessionId() {
@@ -130,6 +133,13 @@ async function startGame(vsCpu) {
         const result = await response.json();
 
         selected = null;
+        pendingMove = null;
+        currentMatchId = Date.now().toString(); // New Match ID
+
+        // Clear Game Over Modal
+        const goModal = document.getElementById('game-over-modal');
+        if (goModal) goModal.style.display = 'none';
+
         updateGameState(result.game_state);
 
     } catch (e) {
@@ -167,7 +177,11 @@ function setThinking(turn, visible, modelName = null) {
 async function cpuMove() {
     if (!gameState || (!gameState.vs_ai && !gameState.ai_vs_ai_mode)) return;
 
-    setThinking(GOTE, true, 'CPU');
+    // Capture match ID called with
+    const matchId = currentMatchId;
+
+    const turn = gameState.turn;
+    setThinking(turn, true, 'CPU');
     try {
         const response = await apiCall('/api/cpu', 'POST', {
             sfen: gameState.sfen,
@@ -176,6 +190,13 @@ async function cpuMove() {
             sente_model: gSenteModel,
             gote_model: gGoteModel
         });
+
+        // Stale Check
+        if (matchId !== currentMatchId) {
+            console.log("DEBUG: Ignoring stale CPU response", matchId, currentMatchId);
+            return;
+        }
+
         const result = await response.json();
         if (result.status === 'ok') {
             updateGameState(result.game_state);
@@ -189,7 +210,7 @@ async function cpuMove() {
     } catch (e) {
         console.error("CPU Move Error", e);
     } finally {
-        setThinking(GOTE, false);
+        setThinking(turn, false);
     }
 }
 
@@ -316,6 +337,11 @@ function renderStatus() {
 
     if (gameState.game_over) {
         indicator.textContent = "勝負あり - 新しい対局を選んでください";
+        // Show Game Over Modal
+        const modal = document.getElementById('game-over-modal');
+        if (modal && modal.style.display !== 'flex') {
+            modal.style.display = 'flex';
+        }
     } else {
         indicator.textContent = gameState.turn === SENTE ? "手番: 先手 (下)" : "手番: 後手 (上)";
     }
@@ -360,6 +386,7 @@ async function onBoardClick(x, y) {
             const isPromoteZone = (dir) => (dir === SENTE && y <= 2) || (dir === GOTE && y >= 6);
 
             // Re-implement check_promote API call logic
+            // Re-implement check_promote API call logic
             let promote = false;
             if (piece) {
                 // Quick client check or API check
@@ -371,7 +398,9 @@ async function onBoardClick(x, y) {
                 });
                 const res = await response.json();
                 if (res.can_promote) {
-                    promote = confirm("成りますか？");
+                    pendingMove = { type: 'move', from: from, to: to };
+                    document.getElementById('promotion-modal').style.display = 'flex';
+                    return;
                 }
             }
 
@@ -379,7 +408,7 @@ async function onBoardClick(x, y) {
                 type: 'move',
                 from: from,
                 to: to,
-                promote: promote
+                promote: false
             });
             selected = null;
 
@@ -438,6 +467,20 @@ async function makeMove(moveData) {
 
 
 
+// Promotion Modal Handler
+function resolvePromotion(shouldPromote) {
+    document.getElementById('promotion-modal').style.display = 'none';
+    if (pendingMove) {
+        makeMove({
+            ...pendingMove,
+            promote: shouldPromote
+        });
+        pendingMove = null;
+        selected = null;
+    }
+}
+
+
 // AI Settings UI Helpers
 function showAiSettings() {
     const el = document.getElementById('ai-settings');
@@ -449,15 +492,31 @@ function hideAiSettings() {
     if (el) el.style.display = 'none';
 }
 
+function showRetryInfo() {
+    const modal = document.getElementById('retry-info-modal');
+    if (modal) {
+        modal.style.display = 'flex';
+    }
+}
+
+function closeRetryInfo(event) {
+    const modal = document.getElementById('retry-info-modal');
+    if (modal) {
+        modal.style.display = 'none';
+    }
+}
+
 // AI vs AI Loop
 async function startAiVsAiMatch() {
     console.log("DEBUG: startAiVsAiMatch clicked");
     hideAiSettings();
     const sModel = document.getElementById('sente-model').value;
     const gModel = document.getElementById('gote-model').value;
+    const retryVal = document.getElementById('max-retries').value;
 
     gSenteModel = sModel;
     gGoteModel = gModel;
+    gMaxRetries = parseInt(retryVal, 10);
 
     console.log("DEBUG: Selected Models:", sModel, gModel);
 
@@ -470,6 +529,13 @@ async function startAiVsAiMatch() {
                 ai_vs_ai: false
             });
             const result = await response.json();
+
+            // Clear UI and State
+            const rArea = document.getElementById('reasoning-area');
+            if (rArea) rArea.innerHTML = '';
+            selected = null;
+            pendingMove = null;
+
             updateGameState(result.game_state);
         } catch (e) {
             console.error("Game Start Error", e);
@@ -490,10 +556,21 @@ async function startAiVsAiMatch() {
         const result = await response.json();
         console.log("DEBUG: Reset Response:", result);
 
+        // Clear UI and State
+        const rArea = document.getElementById('reasoning-area');
+        if (rArea) rArea.innerHTML = '';
+        selected = null;
+        pendingMove = null;
+        currentMatchId = Date.now().toString(); // New Match ID
+
+        // Clear Game Over Modal
+        const goModal = document.getElementById('game-over-modal');
+        if (goModal) goModal.style.display = 'none';
+
         updateGameState(result.game_state);
 
-        console.log("DEBUG: Starting AI Loop...");
-        setTimeout(processAiVsAi, 1000); // Start loop
+        console.log("DEBUG: Starting AI Loop...", currentMatchId);
+        setTimeout(() => processAiVsAi(currentMatchId), 1000); // Start loop with ID
 
     } catch (e) {
         console.error("AI vs AI Start Error", e);
@@ -501,9 +578,18 @@ async function startAiVsAiMatch() {
     }
 }
 
-async function processAiVsAi() {
+async function processAiVsAi(matchId) {
+    // If matchId is provided and doesn't match current, abort
+    if (matchId && matchId !== currentMatchId) {
+        console.log("DEBUG: Stale processAiVsAi call ignored.", matchId, currentMatchId);
+        return;
+    }
+    // If no matchId provided (recurved call might need to handle this differently, 
+    // but easiest is to pass it along or grab current if we trust flow)
+    // Better: Always pass matchId.
+    if (!matchId) matchId = currentMatchId;
+
     if (!gameState || !gameState.ai_vs_ai_mode || gameState.game_over) {
-        // console.log("DEBUG: Stopping AI Loop. mode:", gameState.ai_vs_ai_mode, "over:", gameState.game_over);
         return;
     }
 
@@ -519,11 +605,15 @@ async function processAiVsAi() {
     if (currentModel === 'cpu') {
         console.log("DEBUG: CPU Turn");
         await cpuMove();
+
+        // Stale check after await
+        if (matchId !== currentMatchId) return;
+
         // cpuMove logic calls updateGameState.
         // We need to ensure the loop continues after CPU moves.
         // cpuMove is async and updates state. We should schedule next poll.
         if (!gameState.game_over) {
-            setTimeout(processAiVsAi, 1000);
+            setTimeout(() => processAiVsAi(matchId), 1000);
         }
         return;
     }
@@ -537,9 +627,17 @@ async function processAiVsAi() {
             turn: gameState.turn,
             sente_model: gSenteModel,
             gote_model: gGoteModel,
+            max_retries: gMaxRetries,
             vs_ai: gameState.vs_ai,
             ai_vs_ai: gameState.ai_vs_ai_mode
         });
+
+        // Stale Check immediately after await
+        if (matchId !== currentMatchId) {
+            console.log("DEBUG: Ignoring stale LLM response.", matchId, currentMatchId);
+            return;
+        }
+
         const result = await response.json();
 
         console.log("DEBUG: LLM Move Result:", result);

@@ -22,7 +22,7 @@
             </div>
 
             <div id="sente-hand" class="hand-area">
-                <div class="hand-label">[先手持駒 (クリックで選択)] <span id="sente-thinking" class="thinking-label"
+                <div class="hand-label">[先手持駒] <span id="sente-thinking" class="thinking-label"
                         style="display:none;">(考え中...)</span></div>
                 <div class="hand-pieces" id="sente-hand-pieces"></div>
             </div>
@@ -44,7 +44,7 @@
                         <option value="gemini-3-pro-preview">Gemini 3 Pro Preview</option>
                         <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
                         <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-                        <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+                        <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash-Lite</option>
                         <option value="gpt-5.1-codex-max">GPT-5.1 Codex Max</option>
                         <option value="gpt-5.1-codex">GPT-5.1 Codex</option>
                         <option value="gpt-5.1">GPT-5.1</option>
@@ -57,12 +57,21 @@
                     </select>
                 </div>
                 <div>
+                    <label>RETRY回数：</label>
+                    <select id="max-retries">
+                        <option value="1">1回</option>
+                        <option value="2" selected>2回</option>
+                        <option value="3">3回</option>
+                    </select>
+                    <span class="info-icon" onclick="showRetryInfo()">ℹ️</span>
+                </div>
+                <div>
                     <label>後手：</label>
                     <select id="gote-model">
                         <option value="gemini-3-pro-preview">Gemini 3 Pro Preview</option>
                         <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+                        <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
                         <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash-Lite</option>
-                        <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
                         <option value="gpt-5.1-codex-max">GPT-5.1 Codex Max</option>
                         <option value="gpt-5.1-codex">GPT-5.1 Codex</option>
                         <option value="gpt-5.1">GPT-5.1</option>
@@ -86,6 +95,40 @@
             </div>
         </div>
     </div>
+
+    <!-- Info Modal -->
+    <div id="retry-info-modal" class="modal-overlay" onclick="closeRetryInfo(event)">
+        <div class="modal-content" onclick="event.stopPropagation()">
+            <span class="modal-close-btn" onclick="closeRetryInfo()">×</span>
+            <p>使用しているLLMは将棋に特化したものではありません。そのためSFENデータを正確に読むことができずに、誤った手を打とうとすることがあります。</p>
+            <p>アプリはこのRetry回数だけLLMに次の手を考えさせ、それでも正しい手を打つことができなかった場合、自身が代わりに差してターンを終了します。</p>
+        </div>
+    </div>
+
+    <!-- Promotion Modal -->
+    <div id="promotion-modal" class="modal-overlay">
+        <div class="modal-content" style="text-align: center;">
+            <p style="font-size: 1.2em; font-weight: bold; margin-bottom: 20px;">成りますか？</p>
+            <div style="display: flex; justify-content: center; gap: 20px;">
+                <button onclick="resolvePromotion(true)"
+                    style="padding: 10px 20px; font-size: 1.1em; cursor: pointer;">成る</button>
+                <button onclick="resolvePromotion(false)"
+                    style="padding: 10px 20px; font-size: 1.1em; cursor: pointer;">成らない</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Game Over Modal -->
+    <div id="game-over-modal" class="modal-overlay"
+        onclick="document.getElementById('game-over-modal').style.display = 'none'">
+        <div class="modal-content" style="text-align: center;" onclick="event.stopPropagation()">
+            <p style="font-size: 1.5em; font-weight: bold; margin-bottom: 20px;">勝負あり！</p>
+            <p id="game-over-message" style="margin-bottom: 20px;">新しい対局を選んでください</p>
+            <button onclick="document.getElementById('game-over-modal').style.display = 'none'"
+                style="padding: 10px 20px; font-size: 1.1em; cursor: pointer;">閉じる</button>
+        </div>
+    </div>
+
     <script src="script.js?v=debug3"></script>
 </body>
 
