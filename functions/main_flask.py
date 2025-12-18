@@ -60,6 +60,13 @@ def get_full_state(game, ai_settings=None):
         'gote_model': ai_settings.get('gote_model', DEFAULT_GOTE_MODEL)
     }
 
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Session-ID')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    return response
+
 @app.route('/')
 def index():
     return send_from_directory(app.static_folder, 'index.html')
@@ -77,11 +84,18 @@ def reset_game():
     data = request.json
     vs_cpu = data.get('vs_ai', True)
     ai_vs_ai_mode = data.get('ai_vs_ai', False)
+    sfen_in = data.get('sfen')
     
     if ai_vs_ai_mode:
         vs_cpu = False
 
     game = ShogiGame(vs_ai=vs_cpu)
+    
+    if sfen_in:
+        try:
+            game.from_sfen(sfen_in)
+        except Exception as e:
+            return jsonify({'status': 'error', 'message': f'Invalid SFEN: {e}'}), 400
     
     return jsonify({
         'status': 'ok',

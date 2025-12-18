@@ -43,8 +43,7 @@
                     <select id="sente-model">
                         <option value="gemini-3-pro-preview">Gemini 3 Pro Preview</option>
                         <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
-                        <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-                        <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash-Lite</option>
+                        <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
                         <option value="gpt-5.1-codex-max">GPT-5.1 Codex Max</option>
                         <option value="gpt-5.1-codex">GPT-5.1 Codex</option>
                         <option value="gpt-5.1">GPT-5.1</option>
@@ -70,8 +69,7 @@
                     <select id="gote-model">
                         <option value="gemini-3-pro-preview">Gemini 3 Pro Preview</option>
                         <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
-                        <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-                        <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash-Lite</option>
+                        <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
                         <option value="gpt-5.1-codex-max">GPT-5.1 Codex Max</option>
                         <option value="gpt-5.1-codex">GPT-5.1 Codex</option>
                         <option value="gpt-5.1">GPT-5.1</option>
@@ -83,7 +81,23 @@
                         <option value="cpu">6手先まで読むCPU</option>
                     </select>
                 </div>
-                <button onclick="startAiVsAiMatch()">対局開始</button>
+
+                <hr style="margin: 15px 0;">
+
+                <!-- Resume Feature -->
+                <div style="margin-bottom: 10px;">
+                    <details>
+                        <summary style="cursor: pointer; color: #555;">上級者: SFENから再開</summary>
+                        <div style="margin-top: 5px;">
+                            <input type="text" id="resume-sfen" placeholder="SFEN文字列を入力..."
+                                style="width: 100%; padding: 5px; margin-bottom: 5px;">
+                            <button onclick="startAiVsAiMatch(true)"
+                                style="background: #e0e0e0; color: #333;">SFENから再開</button>
+                        </div>
+                    </details>
+                </div>
+
+                <button onclick="startAiVsAiMatch(false)">対局開始</button>
             </div>
 
             <div class="sfen-area">

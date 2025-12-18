@@ -101,27 +101,45 @@ async function apiCall(endpoint, method = 'GET', body = null) {
 
     let url;
     if (IS_LOCALHOST) {
-        // Localhost proxy works fine
         url = endpoint;
     } else {
-        // Bypass Firebase Hosting proxy (60s limit) by going direct to Cloud Run
         const cleanEndpoint = endpoint.startsWith('/') ? endpoint.substring(1) : endpoint;
         url = `${CLOUD_RUN_URL}/${cleanEndpoint}`;
     }
 
-    // Add timestamp to GET to prevent caching
     if (method === 'GET') {
         url += (url.includes('?') ? '&' : '?') + 't=' + new Date().getTime();
     }
 
-    console.log(`DEBUG: apiCall requesting ${url}`, method, body);
+    // Retry Logic (Max 3 attempts)
+    let attempts = 0;
+    const maxAttempts = 3;
 
-    const response = await fetch(url, options);
-    if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`HTTP ${response.status}: ${text.substring(0, 100)}...`);
+    while (attempts < maxAttempts) {
+        try {
+            console.log(`DEBUG: apiCall requesting ${url} (Attempt ${attempts + 1})`, method, body);
+            const response = await fetch(url, options);
+            if (!response.ok) {
+                // If 5xx error, might be transient. If 4xx, probably permanent.
+                // We retry 5xx.
+                if (response.status >= 500) {
+                    const text = await response.text();
+                    console.warn(`Server Error ${response.status}: ${text}. Retrying...`);
+                    attempts++;
+                    await new Promise(r => setTimeout(r, 1000 * attempts)); // Backoff
+                    continue;
+                }
+                const text = await response.text();
+                throw new Error(`HTTP ${response.status}: ${text.substring(0, 100)}...`);
+            }
+            return response;
+        } catch (e) {
+            console.error(`Fetch Error (Attempt ${attempts + 1}):`, e);
+            attempts++;
+            if (attempts >= maxAttempts) throw e;
+            await new Promise(r => setTimeout(r, 1000 * attempts));
+        }
     }
-    return response;
 }
 
 
@@ -507,8 +525,9 @@ function closeRetryInfo(event) {
 }
 
 // AI vs AI Loop
-async function startAiVsAiMatch() {
-    console.log("DEBUG: startAiVsAiMatch clicked");
+// AI vs AI Loop
+async function startAiVsAiMatch(isResume = false) {
+    console.log("DEBUG: startAiVsAiMatch clicked", isResume);
     hideAiSettings();
     const sModel = document.getElementById('sente-model').value;
     const gModel = document.getElementById('gote-model').value;
@@ -518,7 +537,19 @@ async function startAiVsAiMatch() {
     gGoteModel = gModel;
     gMaxRetries = parseInt(retryVal, 10);
 
-    console.log("DEBUG: Selected Models:", sModel, gModel);
+    // SFEN Resume Logic
+    let sfen = null;
+    if (isResume) {
+        const sfenInput = document.getElementById('resume-sfen');
+        if (sfenInput && sfenInput.value.trim().length > 0) {
+            sfen = sfenInput.value.trim();
+        } else {
+            alert("SFEN文字列を入力してください");
+            return;
+        }
+    }
+
+    console.log("DEBUG: Selected Models:", sModel, gModel, "SFEN Resume:", !!sfen);
 
     // Check if Human vs Human (Legacy Mode)
     if (sModel === 'human' && gModel === 'human') {
@@ -526,7 +557,8 @@ async function startAiVsAiMatch() {
         try {
             const response = await apiCall('/api/reset', 'POST', {
                 vs_ai: false,
-                ai_vs_ai: false
+                ai_vs_ai: false,
+                sfen: sfen // Pass optional SFEN
             });
             const result = await response.json();
 
@@ -551,7 +583,8 @@ async function startAiVsAiMatch() {
             vs_ai: false, // We use ai_vs_ai flags for flexible turns
             ai_vs_ai: true,
             sente_model: sModel,
-            gote_model: gModel
+            gote_model: gModel,
+            sfen: sfen // Pass optional SFEN
         });
         const result = await response.json();
         console.log("DEBUG: Reset Response:", result);
@@ -574,7 +607,7 @@ async function startAiVsAiMatch() {
 
     } catch (e) {
         console.error("AI vs AI Start Error", e);
-        alert("Failed to start AI match");
+        alert("Failed to start AI match: " + e.message);
     }
 }
 
