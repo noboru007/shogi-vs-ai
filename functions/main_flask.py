@@ -462,7 +462,7 @@ def llm_move():
                         
                     # log_info(f"DEBUG: Calling OpenAI API with {model_name}...")
                     
-                    if model_name == "gpt-5-pro" or "codex" in model_name:
+                    if "gpt-5" in model_name or "codex" in model_name:
                         # Special handling for gpt-5-pro (v1/responses)
                         url = "https://api.openai.com/v1/responses"
                         headers = {

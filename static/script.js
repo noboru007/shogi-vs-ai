@@ -161,7 +161,7 @@ async function startGame(vsCpu) {
         updateGameState(result.game_state);
 
     } catch (e) {
-        alert("Start Game Error: " + e.message);
+        showMessage("Start Game Error: " + e.message);
     }
 }
 
@@ -249,7 +249,7 @@ function copySfen() {
     if (!copyText) return;
     copyText.select();
     navigator.clipboard.writeText(copyText.value).then(() => {
-        alert("コピーしました！");
+        showMessage("コピーしました！");
     });
 }
 
@@ -476,10 +476,10 @@ async function makeMove(moveData) {
             }
         } else {
             console.error(result.message);
-            alert("Move Error: " + result.message);
+            showMessage("Move Error: " + result.message);
         }
     } catch (e) {
-        alert("Server Error: " + e.message);
+        showMessage("Server Error: " + e.message);
     }
 }
 
@@ -524,6 +524,23 @@ function closeRetryInfo(event) {
     }
 }
 
+// Generic Message Modal Helpers
+function showMessage(text) {
+    const modal = document.getElementById('message-modal');
+    const msgText = document.getElementById('message-text');
+    if (modal && msgText) {
+        msgText.textContent = text;
+        modal.style.display = 'flex';
+    }
+}
+
+function closeMessage(event) {
+    const modal = document.getElementById('message-modal');
+    if (modal) {
+        modal.style.display = 'none';
+    }
+}
+
 // AI vs AI Loop
 // AI vs AI Loop
 async function startAiVsAiMatch(isResume = false) {
@@ -544,7 +561,7 @@ async function startAiVsAiMatch(isResume = false) {
         if (sfenInput && sfenInput.value.trim().length > 0) {
             sfen = sfenInput.value.trim();
         } else {
-            alert("SFEN文字列を入力してください");
+            showMessage("SFEN文字列を入力してください");
             return;
         }
     }
@@ -571,7 +588,7 @@ async function startAiVsAiMatch(isResume = false) {
             updateGameState(result.game_state);
         } catch (e) {
             console.error("Game Start Error", e);
-            alert("Start Failed");
+            showMessage("Start Failed");
         }
         return;
     }
@@ -607,7 +624,7 @@ async function startAiVsAiMatch(isResume = false) {
 
     } catch (e) {
         console.error("AI vs AI Start Error", e);
-        alert("Failed to start AI match: " + e.message);
+        showMessage("Failed to start AI match: " + e.message);
     }
 }
 

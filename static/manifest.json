@@ -1,0 +1,17 @@
+{
+    "name": "Python Shogi App",
+    "short_name": "ShogiAI",
+    "description": "Play Shogi against AI engines",
+    "start_url": "/?source=pwa",
+    "display": "standalone",
+    "background_color": "#F0D597",
+    "theme_color": "#8b4513",
+    "orientation": "portrait",
+    "icons": [
+        {
+            "src": "icon.png",
+            "sizes": "512x512",
+            "type": "image/png"
+        }
+    ]
+}
