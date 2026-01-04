@@ -404,7 +404,8 @@ def llm_move():
         
         # System Prompt: Role, Rules, Format
         system_prompt = f"""
-        あなたは最強のAI将棋棋士です。
+        役割：あなたは最強のAI将棋棋士です。
+        タスク：ユーザーから受け取った局面（SFENデータ）に対して、最善の一手を出力してください。
         {piece_guide}
 
         ルール:
