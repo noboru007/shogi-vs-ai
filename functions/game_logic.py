@@ -193,6 +193,23 @@ class ShogiGame:
                         return True
         return False
 
+    def can_capture_king(self, attacker):
+        # Check if 'attacker' can capture the opponent's King immediately
+        opponent = attacker * -1
+        king_pos = self.find_king(opponent)
+        if not king_pos: return False # Already captured?
+        
+        kx, ky = king_pos
+        
+        for y in range(BOARD_SIZE):
+            for x in range(BOARD_SIZE):
+                p = self.board[y][x]
+                if p and p["owner"] == attacker:
+                    # Ignore pin checks, just pure physical reachability
+                    if self.is_pseudo_valid_move((x, y), (kx, ky), p, attacker):
+                        return True
+        return False
+
     def simulate_move_check(self, move_type, start_or_name, end, owner, promote=False):
         backup_board_ref = self.board
         temp_board = []
@@ -255,7 +272,12 @@ class ShogiGame:
             if not self.is_pseudo_valid_move(start_or_name, end, piece, owner):
                 return False
                 
-            # 4. Stuck check (Immobile piece)
+            # 4. Promotion Validity Check (Defensive Programming)
+            if promote:
+                if not self.can_promote(sy, ey, owner, piece["name"]):
+                    return False
+
+            # 5. Stuck check (Immobile piece)
             if not promote and self.is_stuck(ex, ey, piece["name"], owner):
                 return False
                 

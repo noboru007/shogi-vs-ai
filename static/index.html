@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Python Shogi Web</title>
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style.css?v=debug4">
     <link rel="manifest" href="manifest.json">
     <link rel="icon" type="image/png" href="icon.png">
     <meta name="theme-color" content="#8b4513">
@@ -46,15 +46,22 @@
                     <label>先手：</label>
                     <select id="sente-model">
                         <option value="gemini-3-pro-preview">Gemini 3 Pro Preview</option>
+                        <option value="gemini-3-pro-preview-high">Gemini 3 Pro Preview (Thinking)</option>
                         <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+                        <option value="gemini-2.5-pro-high">Gemini 2.5 Pro (Thinking)</option>
                         <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
-                        <option value="gpt-5.2-pro">GPT-5.2 Pro</option>
+                        <option value="gemini-3-flash-preview-high">Gemini 3 Flash Preview (Thinking)</option>
+                        <!-- <option value="gpt-5.2-pro">GPT-5.2 Pro</option>
+                        <option value="gpt-5.2-pro-high">GPT-5.2 Pro (High Reasoning)</option>
+                        <option value="gpt-5.2-pro-medium">GPT-5.2 Pro (Medium Reasoning)</option> -->
+                        <option value="gpt-5.2">GPT-5.2</option>
+                        <option value="gpt-5.2-high">GPT-5.2 (High Reasoning)</option>
                         <option value="gpt-5.1-codex-max">GPT-5.1 Codex Max</option>
+                        <option value="gpt-5.1-codex-max-high">GPT-5.1 Codex Max (High Reasoning)</option>
                         <option value="gpt-5.1-codex">GPT-5.1 Codex</option>
                         <option value="gpt-5.1">GPT-5.1</option>
                         <option value="gpt-5-pro">GPT-5 Pro</option>
-                        <option value="gpt-5">GPT-5</option>
-                        <option value="gpt-5-mini">GPT-5 Mini</option>
+                        <option value="gpt-5-pro-high">GPT-5 Pro (High Reasoning)</option>
                         <option value="human" selected>人間</option>
                         <option value="cpu">8手先まで読むCPU</option>
                     </select>
@@ -72,17 +79,32 @@
                     <label>後手：</label>
                     <select id="gote-model">
                         <option value="gemini-3-pro-preview">Gemini 3 Pro Preview</option>
-                        <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+                        <option value="gemini-3-pro-preview-high">Gemini 3 Pro Preview (Thinking)</option>
                         <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
-                        <option value="gpt-5.2-pro">GPT-5.2 Pro</option>
+                        <option value="gemini-3-flash-preview-high">Gemini 3 Flash Preview (Thinking)</option>
+                        <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+                        <option value="gemini-2.5-pro-high">Gemini 2.5 Pro (Thinking)</option>
+                        <!-- <option value="gpt-5.2-pro">GPT-5.2 Pro</option>
+                        <option value="gpt-5.2-pro-high">GPT-5.2 Pro (High Reasoning)</option>
+                        <option value="gpt-5.2-pro-medium">GPT-5.2 Pro (Medium Reasoning)</option> -->
+                        <option value="gpt-5.2">GPT-5.2</option>
+                        <option value="gpt-5.2-high">GPT-5.2 (High Reasoning)</option>
                         <option value="gpt-5.1-codex-max">GPT-5.1 Codex Max</option>
+                        <option value="gpt-5.1-codex-max-high">GPT-5.1 Codex Max (High Reasoning)</option>
                         <option value="gpt-5.1-codex">GPT-5.1 Codex</option>
                         <option value="gpt-5.1">GPT-5.1</option>
                         <option value="gpt-5-pro">GPT-5 Pro</option>
-                        <option value="gpt-5">GPT-5</option>
-                        <option value="gpt-5-mini">GPT-5 Mini</option>
-                        <option value="human">人間</option>
+                        <option value="gpt-5-pro-high">GPT-5 Pro (High Reasoning)</option>
+                        <option value="human" selected>人間</option>
                         <option value="cpu">8手先まで読むCPU</option>
+                    </select>
+                </div>
+                <div>
+                    <label for="ai_instruction_type">AIへの指示レベル</label>
+                    <select id="ai_instruction_type">
+                        <option value="simple">シンプルな役割設定のみ</option>
+                        <option value="medium" selected>正確で最善な一手の思考をルール付けする</option>
+                        <option value="advanced">選択可能な合法手リストを教えてあげる</option>
                     </select>
                 </div>
 
@@ -104,13 +126,7 @@
                 <button onclick="startAiVsAiMatch(false)">対局開始</button>
             </div>
 
-            <div class="sfen-area">
-                <div class="sfen-controls">
-                    <span class="sfen-label">盤上の駒データ（SFEN）をコピーしてAIに相談。</span>
-                    <button id="copy-btn" onclick="copySfen()">📋 コピー</button>
-                </div>
-                <textarea id="sfen-entry" rows="3" readonly></textarea>
-            </div>
+
         </div>
     </div>
 

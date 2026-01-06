@@ -10,7 +10,7 @@ except Exception as e:
     raise e
 
 
-@https_fn.on_request(timeout_sec=600, memory=options.MemoryOption.MB_512)
+@https_fn.on_request(timeout_sec=3600, memory=options.MemoryOption.MB_512)
 def shogi_api(req: https_fn.Request) -> https_fn.Response:
     with flask_app.request_context(req.environ):
         return flask_app.full_dispatch_request()

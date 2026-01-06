@@ -5,7 +5,7 @@ const GOTE = -1;
 console.log("SCRIPT LOADED vdebug3");
 
 // Helper to log moves
-function logMove(moveCount, modelName, moveStr, reasoning = null) {
+function logMove(moveCount, modelName, moveStr, reasoning = null, isFallback = false) {
     const rArea = document.getElementById('reasoning-area');
     if (!rArea) return;
 
@@ -13,9 +13,11 @@ function logMove(moveCount, modelName, moveStr, reasoning = null) {
     rArea.style.display = 'block';
 
     const entry = document.createElement('div');
-    entry.style.borderBottom = "1px solid #eee";
-    entry.style.marginBottom = "5px";
-    entry.style.paddingBottom = "5px";
+    entry.classList.add('log-entry');
+
+    if (isFallback) {
+        entry.classList.add('log-fallback');
+    }
 
     const moveNum = moveCount ? `[#${moveCount}]` : "";
     const mStr = moveStr || "";
@@ -34,6 +36,19 @@ function logMove(moveCount, modelName, moveStr, reasoning = null) {
         entry.appendChild(reasonText);
     }
 
+    // Append SFEN
+    if (gameState && gameState.sfen) {
+        const sfenDiv = document.createElement('div');
+        sfenDiv.classList.add('sfen-text');
+        sfenDiv.style.fontSize = "0.8em";
+        sfenDiv.style.marginTop = "2px";
+        if (!isFallback) {
+            sfenDiv.style.color = "#777";
+        }
+        sfenDiv.textContent = `SFEN: ${gameState.sfen}`;
+        entry.appendChild(sfenDiv);
+    }
+
     rArea.insertBefore(entry, rArea.firstChild);
 }
 
@@ -43,6 +58,7 @@ let pendingMove = null; // Store move waiting for promotion confirmation
 let gSenteModel = "gemini-2.5-pro";
 let gGoteModel = "gemini-2.5-pro";
 let gMaxRetries = 2;
+let gInstructionType = "medium";
 let currentMatchId = null; // To prevent stale AI responses from overwriting new game
 
 // Session Management (Local Only)
@@ -237,20 +253,7 @@ function render() {
     renderBoard();
     renderHands();
     renderStatus();
-    if (gameState.sfen) {
-        // Just for display/copy
-        const sfenEl = document.getElementById('sfen-entry');
-        if (sfenEl) sfenEl.value = `あなたは最強の将棋AIです。この局面の次の一手は？\n${gameState.sfen}`;
-    }
-}
-
-function copySfen() {
-    const copyText = document.getElementById("sfen-entry");
-    if (!copyText) return;
-    copyText.select();
-    navigator.clipboard.writeText(copyText.value).then(() => {
-        showMessage("コピーしました！");
-    });
+    renderStatus();
 }
 
 function renderBoard() {
@@ -549,10 +552,13 @@ async function startAiVsAiMatch(isResume = false) {
     const sModel = document.getElementById('sente-model').value;
     const gModel = document.getElementById('gote-model').value;
     const retryVal = document.getElementById('max-retries').value;
+    const instructionEl = document.getElementById('ai_instruction_type');
+    const instructionVal = instructionEl ? instructionEl.value : 'medium';
 
     gSenteModel = sModel;
     gGoteModel = gModel;
     gMaxRetries = parseInt(retryVal, 10);
+    gInstructionType = instructionVal;
 
     // SFEN Resume Logic
     let sfen = null;
@@ -601,6 +607,9 @@ async function startAiVsAiMatch(isResume = false) {
             ai_vs_ai: true,
             sente_model: sModel,
             gote_model: gModel,
+            sente_model: sModel,
+            gote_model: gModel,
+            ai_instruction_type: document.getElementById('ai_instruction_type').value,
             sfen: sfen // Pass optional SFEN
         });
         const result = await response.json();
@@ -678,6 +687,7 @@ async function processAiVsAi(matchId) {
             sente_model: gSenteModel,
             gote_model: gGoteModel,
             max_retries: gMaxRetries,
+            ai_instruction_type: document.getElementById('ai_instruction_type') ? document.getElementById('ai_instruction_type').value : 'medium',
             vs_ai: gameState.vs_ai,
             ai_vs_ai: gameState.ai_vs_ai_mode
         });
@@ -695,11 +705,20 @@ async function processAiVsAi(matchId) {
         if (result.status === 'ok') {
             updateGameState(result.game_state);
 
+            // Handle AI Fallback Warning (Optional: can still keep it or rely on red text)
+            // User requested red text in log, so passing flag to logMove is key.
+            // Removing renderStatus warning update as per request.
+            if (result.fallback_used) {
+                gameState.ai_fallback_triggered = true;
+                // renderStatus(); // Removed as requested
+            }
+
             // Show Reasoning
             if (result.reasoning || result.move_str_ja) {
                 const mStr = result.move_str_ja || result.usi || "";
                 const model = result.model || "AI";
-                logMove(result.move_count, model, mStr, result.reasoning);
+                // Pass fallback flag
+                logMove(result.move_count, model, mStr, result.reasoning, result.fallback_used);
             }
 
             // Loop continue
