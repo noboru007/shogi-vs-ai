@@ -56,6 +56,7 @@
                         <option value="gpt-5.2-pro-medium">GPT-5.2 Pro (Medium Reasoning)</option> -->
                         <option value="gpt-5.2">GPT-5.2</option>
                         <option value="gpt-5.2-high">GPT-5.2 (High Reasoning)</option>
+                        <option value="gpt-5.2-low">GPT-5.2 (Low Reasoning)</option>
                         <option value="gpt-5.1-codex-max">GPT-5.1 Codex Max</option>
                         <option value="gpt-5.1-codex-max-high">GPT-5.1 Codex Max (High Reasoning)</option>
                         <option value="gpt-5.1-codex">GPT-5.1 Codex</option>
@@ -89,6 +90,7 @@
                         <option value="gpt-5.2-pro-medium">GPT-5.2 Pro (Medium Reasoning)</option> -->
                         <option value="gpt-5.2">GPT-5.2</option>
                         <option value="gpt-5.2-high">GPT-5.2 (High Reasoning)</option>
+                        <option value="gpt-5.2-low">GPT-5.2 (Low Reasoning)</option>
                         <option value="gpt-5.1-codex-max">GPT-5.1 Codex Max</option>
                         <option value="gpt-5.1-codex-max-high">GPT-5.1 Codex Max (High Reasoning)</option>
                         <option value="gpt-5.1-codex">GPT-5.1 Codex</option>
@@ -106,6 +108,18 @@
                         <option value="medium" selected>正確で最善な一手の思考をルール付けする</option>
                         <option value="advanced">選択可能な合法手リストを教えてあげる</option>
                     </select>
+                </div>
+
+                <!-- TTS (Voice Narration) Settings -->
+                <div style="margin-top: 10px;">
+                    <label>
+                        <input type="checkbox" id="tts-enabled"> 手番解説を読み上げる
+                    </label>
+                </div>
+                <div id="tts-save-option" style="display: none; margin-left: 20px;">
+                    <label>
+                        <input type="checkbox" id="tts-save-file"> 音声ファイルを保存する
+                    </label>
                 </div>
 
                 <hr style="margin: 15px 0;">

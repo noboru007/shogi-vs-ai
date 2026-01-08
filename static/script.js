@@ -59,6 +59,9 @@ let gSenteModel = "gemini-2.5-pro";
 let gGoteModel = "gemini-2.5-pro";
 let gMaxRetries = 2;
 let gInstructionType = "medium";
+let gTtsEnabled = false;
+let gTtsSaveFile = false;
+let gMatchPrefix = ""; // yyyymmdd_hhmmss_Sente_vs_Gote
 let currentMatchId = null; // To prevent stale AI responses from overwriting new game
 
 // Session Management (Local Only)
@@ -544,6 +547,131 @@ function closeMessage(event) {
     }
 }
 
+// TTS Audio Playback and Save Functions
+function playTtsAudio(base64Audio) {
+    if (!base64Audio) return;
+    try {
+        const binaryString = atob(base64Audio);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+        }
+        const sampleRate = 24000;
+        const numChannels = 1;
+        const bitsPerSample = 16;
+        const byteRate = sampleRate * numChannels * bitsPerSample / 8;
+        const blockAlign = numChannels * bitsPerSample / 8;
+        const dataSize = bytes.length;
+        const headerSize = 44;
+        const fileSize = headerSize + dataSize - 8;
+        const wavBuffer = new ArrayBuffer(headerSize + dataSize);
+        const view = new DataView(wavBuffer);
+        writeString(view, 0, 'RIFF');
+        view.setUint32(4, fileSize, true);
+        writeString(view, 8, 'WAVE');
+        writeString(view, 12, 'fmt ');
+        view.setUint32(16, 16, true);
+        view.setUint16(20, 1, true);
+        view.setUint16(22, numChannels, true);
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, byteRate, true);
+        view.setUint16(32, blockAlign, true);
+        view.setUint16(34, bitsPerSample, true);
+        writeString(view, 36, 'data');
+        view.setUint32(40, dataSize, true);
+        const wavBytes = new Uint8Array(wavBuffer);
+        wavBytes.set(bytes, headerSize);
+        const blob = new Blob([wavBuffer], { type: 'audio/wav' });
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.play().catch(e => console.error('TTS playback error:', e));
+        audio.onended = () => URL.revokeObjectURL(url);
+        return wavBuffer;
+    } catch (e) {
+        console.error('TTS audio processing error:', e);
+        return null;
+    }
+}
+
+function writeString(view, offset, string) {
+    for (let i = 0; i < string.length; i++) {
+        view.setUint8(offset + i, string.charCodeAt(i));
+    }
+}
+
+function saveTtsAudioFile(base64Audio, moveCount, moveStr) {
+    if (!base64Audio) return;
+    try {
+        const binaryString = atob(base64Audio);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+        }
+        const sampleRate = 24000;
+        const numChannels = 1;
+        const bitsPerSample = 16;
+        const byteRate = sampleRate * numChannels * bitsPerSample / 8;
+        const blockAlign = numChannels * bitsPerSample / 8;
+        const dataSize = bytes.length;
+        const headerSize = 44;
+        const fileSize = headerSize + dataSize - 8;
+        const wavBuffer = new ArrayBuffer(headerSize + dataSize);
+        const view = new DataView(wavBuffer);
+        writeString(view, 0, 'RIFF');
+        view.setUint32(4, fileSize, true);
+        writeString(view, 8, 'WAVE');
+        writeString(view, 12, 'fmt ');
+        view.setUint32(16, 16, true);
+        view.setUint16(20, 1, true);
+        view.setUint16(22, numChannels, true);
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, byteRate, true);
+        view.setUint16(32, blockAlign, true);
+        view.setUint16(34, bitsPerSample, true);
+        writeString(view, 36, 'data');
+        view.setUint32(40, dataSize, true);
+        const wavBytes = new Uint8Array(wavBuffer);
+        wavBytes.set(bytes, headerSize);
+        const paddedCount = String(moveCount).padStart(3, '0');
+        const cleanMoveStr = moveStr.replace(/[\/\\:*?"<>|]/g, '');
+        let filename;
+        if (typeof gMatchPrefix !== 'undefined' && gMatchPrefix) {
+            filename = `${gMatchPrefix}_${paddedCount}_${cleanMoveStr}.wav`;
+        } else {
+            const now = new Date();
+            const dateStr = now.getFullYear().toString() +
+                String(now.getMonth() + 1).padStart(2, '0') +
+                String(now.getDate()).padStart(2, '0');
+            filename = `${paddedCount}_${cleanMoveStr}_${dateStr}.wav`;
+        }
+        const blob = new Blob([wavBuffer], { type: 'audio/wav' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        console.log(`TTS: Saved audio file: ${filename}`);
+    } catch (e) {
+        console.error('TTS save error:', e);
+    }
+}
+
+function initTtsUI() {
+    const ttsCheckbox = document.getElementById('tts-enabled');
+    const saveOption = document.getElementById('tts-save-option');
+    if (ttsCheckbox && saveOption) {
+        ttsCheckbox.addEventListener('change', () => {
+            saveOption.style.display = ttsCheckbox.checked ? 'block' : 'none';
+            if (!ttsCheckbox.checked) {
+                document.getElementById('tts-save-file').checked = false;
+            }
+        });
+    }
+}
+
 // AI vs AI Loop
 // AI vs AI Loop
 async function startAiVsAiMatch(isResume = false) {
@@ -559,6 +687,26 @@ async function startAiVsAiMatch(isResume = false) {
     gGoteModel = gModel;
     gMaxRetries = parseInt(retryVal, 10);
     gInstructionType = instructionVal;
+
+    // TTS Settings
+    const ttsCheckbox = document.getElementById('tts-enabled');
+    const ttsSaveCheckbox = document.getElementById('tts-save-file');
+    gTtsEnabled = ttsCheckbox ? ttsCheckbox.checked : false;
+    gTtsSaveFile = ttsSaveCheckbox ? ttsSaveCheckbox.checked : false;
+
+    // Generate Match Prefix: yyyymmdd_hhmmss_Sente_vs_Gote
+    const now = new Date();
+    const dateStr = now.getFullYear().toString() +
+        String(now.getMonth() + 1).padStart(2, '0') +
+        String(now.getDate()).padStart(2, '0') + '_' +
+        String(now.getHours()).padStart(2, '0') +
+        String(now.getMinutes()).padStart(2, '0') +
+        String(now.getSeconds()).padStart(2, '0');
+    const cleanS = sModel.replace(/[^a-zA-Z0-9.\-_]/g, '');
+    const cleanG = gModel.replace(/[^a-zA-Z0-9.\-_]/g, '');
+    gMatchPrefix = `${dateStr}_${cleanS}_vs_${cleanG}`;
+
+    console.log("DEBUG: TTS Enabled:", gTtsEnabled, "Save File:", gTtsSaveFile, "Prefix:", gMatchPrefix);
 
     // SFEN Resume Logic
     let sfen = null;
@@ -689,7 +837,8 @@ async function processAiVsAi(matchId) {
             max_retries: gMaxRetries,
             ai_instruction_type: document.getElementById('ai_instruction_type') ? document.getElementById('ai_instruction_type').value : 'medium',
             vs_ai: gameState.vs_ai,
-            ai_vs_ai: gameState.ai_vs_ai_mode
+            ai_vs_ai: gameState.ai_vs_ai_mode,
+            tts_enabled: gTtsEnabled
         });
 
         // Stale Check immediately after await
@@ -717,8 +866,15 @@ async function processAiVsAi(matchId) {
             if (result.reasoning || result.move_str_ja) {
                 const mStr = result.move_str_ja || result.usi || "";
                 const model = result.model || "AI";
-                // Pass fallback flag
                 logMove(result.move_count, model, mStr, result.reasoning, result.fallback_used);
+            }
+
+            // TTS Playback and Save
+            if (result.tts_audio) {
+                playTtsAudio(result.tts_audio);
+                if (gTtsSaveFile && result.move_str_ja) {
+                    saveTtsAudioFile(result.tts_audio, result.move_count, result.move_str_ja);
+                }
             }
 
             // Loop continue
@@ -740,4 +896,5 @@ async function processAiVsAi(matchId) {
 // Initialization
 window.onload = () => {
     loadLocalState();
+    initTtsUI();
 };

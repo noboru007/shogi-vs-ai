@@ -33,6 +33,119 @@ CORS(app) # Enable CORS for all routes
 DEFAULT_SENTE_MODEL = "gemini-2.5-pro"
 DEFAULT_GOTE_MODEL = "gemini-2.5-pro"
 
+# TTS Voice Settings per LLM model
+# Each entry: system_prompt for voice style, voice name from Gemini TTS
+TTS_VOICE_CONFIG = {
+    "gemini-3-pro-preview": {
+        "system_prompt": "将棋を指している両者が、自分の手の解説をします。10代の明るくフレンドリー声のトーンで。",
+        "voice": "Leda"
+    },
+    "gemini-3-flash-preview": {
+        "system_prompt": "将棋を指している両者が、自分の手の解説をします。10代の明るくフレンドリー声のトーンで。",
+        "voice": "Leda"
+    },
+    "gpt-5.2": {
+        "system_prompt": "将棋を指している両者が、自分の手の解説をします。20代の艶やかな声のトーンで。",
+        "voice": "Erinome"
+    },
+    "gpt-5.2-high": {
+        "system_prompt": "将棋を指している両者が、自分の手の解説をします。20代の艶やかな声のトーンで。",
+        "voice": "Erinome"
+    },
+    "default": {
+        "system_prompt": "将棋を指している両者が、自分の手の解説をします。",
+        "voice": "Sadaltager"
+    }
+}
+
+TTS_MODEL = "gemini-2.5-flash-preview-tts"
+
+def get_tts_config(model_name, is_fallback=False):
+    """Get TTS config for the given LLM model name."""
+    if is_fallback:
+        return TTS_VOICE_CONFIG["default"]
+    
+    # Strip suffixes like -high, -low, -medium
+    base_model = model_name
+    for suffix in ["-high", "-medium", "-low"]:
+        if base_model.endswith(suffix):
+            base_model = base_model[:-len(suffix)]
+            break
+    
+    # Check exact match first
+    if base_model in TTS_VOICE_CONFIG:
+        return TTS_VOICE_CONFIG[base_model]
+    
+    # Check partial match (e.g. "gemini-3-pro-preview" matches "gemini-3-pro")
+    for key in TTS_VOICE_CONFIG:
+        if key != "default" and base_model.startswith(key):
+            return TTS_VOICE_CONFIG[key]
+    
+    return TTS_VOICE_CONFIG["default"]
+
+def generate_tts_audio(text, model_name, turn, is_fallback=False):
+    """
+    Generate TTS audio using Gemini TTS API.
+    Returns base64-encoded audio data or None on error.
+    """
+    google_api_key = os.getenv("GOOGLE_API_KEY")
+    if not google_api_key:
+        log_error("TTS: GOOGLE_API_KEY not set")
+        return None
+    
+    tts_config = get_tts_config(model_name, is_fallback)
+    voice_name = tts_config["voice"]
+    system_prompt = tts_config["system_prompt"]
+    
+    turn_str = "先手" if turn == SENTE else "後手"
+    
+    # Combine system prompt with the content to speak
+    full_text = f"{system_prompt}\n\n{turn_str}：{text}"
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{TTS_MODEL}:generateContent?key={google_api_key}"
+    
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "contents": [{
+            "parts": [{"text": full_text}]
+        }],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {
+                "voiceConfig": {
+                    "prebuiltVoiceConfig": {
+                        "voiceName": voice_name
+                    }
+                }
+            }
+        }
+    }
+    
+    try:
+        log_info(f"TTS: Generating audio with voice={voice_name}, model={TTS_MODEL}")
+        resp = requests.post(url, headers=headers, json=payload, timeout=60)
+        
+        if resp.status_code != 200:
+            log_error(f"TTS API error: {resp.status_code} {resp.text}")
+            return None
+        
+        resp_json = resp.json()
+        
+        # Extract base64 audio data
+        # Response format: candidates[0].content.parts[0].inlineData.data
+        try:
+            audio_data = resp_json['candidates'][0]['content']['parts'][0]['inlineData']['data']
+            log_info(f"TTS: Successfully generated audio, size={len(audio_data)} chars")
+            return audio_data
+        except (KeyError, IndexError) as e:
+            log_error(f"TTS: Failed to parse response: {e}")
+            log_info(f"TTS: Response keys: {resp_json.keys() if resp_json else 'None'}")
+            return None
+            
+    except Exception as e:
+        log_error(f"TTS: Request failed: {e}")
+        return None
+
 # Helper to reconstruct game from SFEN part of request
 def game_from_request(data):
     sfen = data.get('sfen')
@@ -376,10 +489,12 @@ def llm_move():
         ai_vs_ai_mode = req_data.get('ai_vs_ai_mode', False) or req_data.get('ai_vs_ai', False)
         sente_model = req_data.get('sente_model', DEFAULT_SENTE_MODEL)
         gote_model = req_data.get('gote_model', DEFAULT_GOTE_MODEL)
+        tts_enabled = req_data.get('tts_enabled', False)
         
         sente_model_name = sente_model
         gote_model_name = gote_model
         model_name = sente_model_name if turn == SENTE else gote_model_name
+        display_model_name = model_name
         
         enable_high_reasoning = False
         if model_name.endswith("-high"):
@@ -391,7 +506,12 @@ def llm_move():
              model_name = model_name[:-7] # Remove "-medium"
              enable_medium_reasoning = True
         
-        log_info(f"DEBUG: Stateless Turn: {turn}, Model: {model_name}, HighReasoning: {enable_high_reasoning}, MediumReasoning: {enable_medium_reasoning}")
+        enable_low_reasoning = False
+        if model_name.endswith("-low"):
+             model_name = model_name[:-4] # Remove "-low"
+             enable_low_reasoning = True
+
+        log_info(f"DEBUG: Stateless Turn: {turn}, Model: {model_name}, HighReasoning: {enable_high_reasoning}, MediumReasoning: {enable_medium_reasoning}, LowReasoning: {enable_low_reasoning}")
 
         legal_moves = game.get_legal_moves(turn)
         legal_moves_usi = []
@@ -558,6 +678,10 @@ def llm_move():
                         
                         if enable_high_reasoning:
                             payload["reasoning"] = {"effort": "high"}
+                        elif enable_medium_reasoning:
+                            payload["reasoning"] = {"effort": "medium"}
+                        elif enable_low_reasoning:
+                            payload["reasoning"] = {"effort": "low"}
 
                         try:
                             # Add timeout to initial request (1200s for High Reasoning)
@@ -642,7 +766,9 @@ def llm_move():
                                     {"role": "system", "content": system_prompt},
                                     {"role": "user", "content": current_user_prompt}
                                 ],
-                                **({"reasoning_effort": "high"} if enable_high_reasoning else {})
+                                **({"reasoning_effort": "high"} if enable_high_reasoning else 
+                                   {"reasoning_effort": "medium"} if enable_medium_reasoning else
+                                   {"reasoning_effort": "low"} if enable_low_reasoning else {})
                             )
                             text = response.choices[0].message.content
                         except Exception as e:
@@ -845,7 +971,7 @@ def llm_move():
                             'move_str_ja': move_str_ja,
                             'move_count': current_move_count,
                             'reasoning': reasoning + " (反則負け: 王将を取られる状態です)", 
-                            'model': model_name,
+                            'model': display_model_name,
                             'game_over': True,
                             'winner': winner_name,
                             'game_state': get_full_state(game, {'ai_vs_ai_mode': ai_vs_ai_mode, 'sente_model': sente_model, 'gote_model': gote_model})
@@ -870,9 +996,18 @@ def llm_move():
                     'move_str_ja': move_str_ja,
                     'move_count': current_move_count,
                     'reasoning': reasoning, 
-                    'model': model_name,
+                    'model': display_model_name,
                     'game_state': get_full_state(game, {'ai_vs_ai_mode': ai_vs_ai_mode, 'sente_model': sente_model, 'gote_model': gote_model})
                 }
+                
+                # Generate TTS audio if enabled
+                if tts_enabled and move_str_ja:
+                    # Content to speak: move + reasoning (excluding SFEN)
+                    tts_text = f"{move_str_ja}。{reasoning}" if reasoning else move_str_ja
+                    tts_audio = generate_tts_audio(tts_text, model_name, turn, is_fallback=False)
+                    if tts_audio:
+                        response_data['tts_audio'] = tts_audio
+                
                 return jsonify(response_data)
 
             except Exception as e:
@@ -915,6 +1050,16 @@ def llm_move():
             'fallback_used': True,
             'game_state': get_full_state(game, {'ai_vs_ai_mode': ai_vs_ai_mode, 'sente_model': sente_model, 'gote_model': gote_model})
         }
+        
+        # Generate TTS audio for fallback if enabled
+        if tts_enabled and move_str_ja:
+            turn_str = "先手" if turn == SENTE else "後手"
+            # Special fallback message format
+            tts_text = f"{turn_str}が違法手を打とうとしたため、CPUが代打ちしました。{move_str_ja}。{turn_str}の一手と理由：{last_error}"
+            tts_audio = generate_tts_audio(tts_text, model_name, turn, is_fallback=True)
+            if tts_audio:
+                response_data['tts_audio'] = tts_audio
+        
         return jsonify(response_data)
 
     except Exception as e:
