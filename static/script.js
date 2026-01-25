@@ -75,9 +75,69 @@ function getSessionId() {
 }
 
 // Client-Side State Helpers
+
+// Sanitize game state to fix potential browser compatibility issues
+function sanitizeGameState(state) {
+    if (!state) return null;
+
+    try {
+        // Ensure board is a proper 9x9 array
+        if (!state.board || !Array.isArray(state.board) || state.board.length !== 9) {
+            console.warn("Invalid board structure, resetting");
+            return null;
+        }
+
+        // Verify each row is also a proper array of 9 elements
+        for (let y = 0; y < 9; y++) {
+            if (!Array.isArray(state.board[y]) || state.board[y].length !== 9) {
+                console.warn(`Invalid board row ${y}, resetting`);
+                return null;
+            }
+        }
+
+        // Normalize hands keys (convert string keys to integers)
+        if (state.hands) {
+            const normalizedHands = {};
+            for (const key of Object.keys(state.hands)) {
+                const intKey = parseInt(key, 10);
+                if (!isNaN(intKey) && (intKey === 1 || intKey === -1)) {
+                    normalizedHands[intKey] = state.hands[key] || {};
+                }
+            }
+            // Ensure both SENTE(1) and GOTE(-1) exist
+            if (!normalizedHands[1]) normalizedHands[1] = {};
+            if (!normalizedHands[-1]) normalizedHands[-1] = {};
+            state.hands = normalizedHands;
+        } else {
+            state.hands = { 1: {}, "-1": {} };
+        }
+
+        // Ensure turn is integer
+        if (state.turn !== undefined) {
+            state.turn = parseInt(state.turn, 10);
+            if (state.turn !== 1 && state.turn !== -1) {
+                state.turn = 1; // Default to SENTE
+            }
+        }
+
+        return state;
+    } catch (e) {
+        console.error("State sanitization error:", e);
+        return null;
+    }
+}
+
 function updateGameState(newState) {
     if (!newState) return;
-    gameState = newState;
+
+    // Sanitize before storing
+    const sanitized = sanitizeGameState(newState);
+    if (!sanitized) {
+        console.error("Failed to sanitize game state, ignoring update");
+        return;
+    }
+
+    gameState = sanitized;
     localStorage.setItem('shogi_state', JSON.stringify(gameState));
 
     // Sync models if present (Persistence fix)
@@ -92,10 +152,19 @@ function loadLocalState() {
     if (saved) {
         try {
             const parsed = JSON.parse(saved);
-            updateGameState(parsed);
-            return true;
+            const sanitized = sanitizeGameState(parsed);
+            if (sanitized) {
+                updateGameState(sanitized);
+                return true;
+            } else {
+                // Invalid data, clear it
+                console.warn("Clearing corrupted local storage");
+                localStorage.removeItem('shogi_state');
+                return false;
+            }
         } catch (e) {
             console.error("Local state parse error", e);
+            localStorage.removeItem('shogi_state');
             return false;
         }
     }
@@ -256,7 +325,6 @@ function render() {
     renderBoard();
     renderHands();
     renderStatus();
-    renderStatus();
 }
 
 function renderBoard() {
@@ -334,7 +402,7 @@ function renderHands() {
             const piece = document.createElement('div');
             piece.className = 'hand-piece';
             piece.textContent = `${name}:${count}`;
-            if (selected && selected.type === 'hand' && selected.name === name) {
+            if (selected && selected.type === 'hand' && selected.name === name && gameState.turn === SENTE) {
                 piece.classList.add('selected');
             }
             piece.onclick = () => onHandClick(name);
@@ -351,6 +419,10 @@ function renderHands() {
             inner.textContent = `${name}:${count}`;
             inner.style.transform = 'rotate(180deg)';
             piece.appendChild(inner);
+            if (selected && selected.type === 'hand' && selected.name === name && gameState.turn === GOTE) {
+                piece.classList.add('selected');
+            }
+            piece.onclick = () => onHandClick(name);
             goteHandEl.appendChild(piece);
         }
     }
@@ -393,6 +465,10 @@ function onHandClick(name) {
         const currentModel = (gameState.turn === SENTE) ? gSenteModel : gGoteModel;
         if (currentModel !== 'human') return;
     }
+
+    // 自分の持駒だけを選択可能にする（相手の持駒はクリックしても無効）
+    const myHand = gameState.hands[gameState.turn];
+    if (!myHand || !(name in myHand) || myHand[name] <= 0) return;
 
     if (selected && selected.type === 'hand' && selected.name === name) {
         selected = null;
@@ -929,8 +1005,6 @@ async function startAiVsAiMatch(isResume = false) {
             ai_vs_ai: true,
             sente_model: sModel,
             gote_model: gModel,
-            sente_model: sModel,
-            gote_model: gModel,
             ai_instruction_type: document.getElementById('ai_instruction_type').value,
             sfen: sfen // Pass optional SFEN
         });
@@ -1072,7 +1146,21 @@ async function processAiVsAi(matchId) {
 
 
 // Initialization
-window.onload = () => {
-    loadLocalState();
+window.onload = async () => {
+    const loaded = loadLocalState();
     initTtsUI();
+
+    // 初回アクセス時は初期盤面を生成
+    if (!loaded) {
+        try {
+            const response = await apiCall('/api/reset', 'POST', {
+                vs_ai: false,
+                ai_vs_ai: false
+            });
+            const result = await response.json();
+            updateGameState(result.game_state);
+        } catch (e) {
+            console.error("Failed to initialize game:", e);
+        }
+    }
 };
