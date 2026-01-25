@@ -10,6 +10,7 @@
     <link rel="icon" type="image/png" href="icon.png">
     <meta name="theme-color" content="#8b4513">
     <link rel="apple-touch-icon" href="icon.png">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 </head>
 
 <body>
@@ -172,8 +173,14 @@
         <div class="modal-content" style="text-align: center;" onclick="event.stopPropagation()">
             <p style="font-size: 1.5em; font-weight: bold; margin-bottom: 20px;">勝負あり！</p>
             <p id="game-over-message" style="margin-bottom: 20px;">新しい対局を選んでください</p>
-            <button onclick="document.getElementById('game-over-modal').style.display = 'none'"
-                style="padding: 10px 20px; font-size: 1.1em; cursor: pointer;">閉じる</button>
+            <div style="display: flex; justify-content: center; gap: 10px; flex-wrap: wrap;">
+                <button id="download-audio-btn" onclick="downloadMatchAudio()"
+                    style="padding: 10px 20px; font-size: 1.1em; cursor: pointer; display: none;">
+                    音声ファイルをダウンロード
+                </button>
+                <button onclick="document.getElementById('game-over-modal').style.display = 'none'"
+                    style="padding: 10px 20px; font-size: 1.1em; cursor: pointer;">閉じる</button>
+            </div>
         </div>
     </div>
 

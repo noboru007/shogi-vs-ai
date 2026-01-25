@@ -314,7 +314,8 @@ function renderBoard() {
 
         const rowCoord = document.createElement('div');
         rowCoord.className = 'coord';
-        rowCoord.textContent = kanjiNumbers[y];
+        const alphabet = String.fromCharCode(97 + y); // a, b, c...
+        rowCoord.innerHTML = `${kanjiNumbers[y]}<br>${alphabet}`;
         boardEl.appendChild(rowCoord);
     }
 }
@@ -365,6 +366,16 @@ function renderStatus() {
         const modal = document.getElementById('game-over-modal');
         if (modal && modal.style.display !== 'flex') {
             modal.style.display = 'flex';
+
+            // Show download button if TTS was enabled and files exist
+            if (gTtsSaveFile && currentMatchId) {
+                getTtsFilesForMatch(currentMatchId).then(files => {
+                    const btn = document.getElementById('download-audio-btn');
+                    if (btn && files && files.length > 0) {
+                        btn.style.display = 'inline-block';
+                    }
+                }).catch(e => console.error('Error checking TTS files:', e));
+            }
         }
     } else {
         indicator.textContent = gameState.turn === SENTE ? "手番: 先手 (下)" : "手番: 後手 (上)";
@@ -373,7 +384,9 @@ function renderStatus() {
 
 function onHandClick(name) {
     if (gameState.game_over) return;
-    if (gameState.turn !== SENTE && !gameState.ai_vs_ai_mode) return;
+    // 人間 vs AI モード（vs_ai=true）では先手のみプレイ可能（後手はAI）
+    // 人間対人間モード（vs_ai=false かつ ai_vs_ai=false）では両方プレイ可能
+    if (gameState.vs_ai && gameState.turn !== SENTE) return;
 
     // In AI/Mixed mode, prevent human from moving if it's not their turn (i.e. model is not 'human')
     if (gameState.ai_vs_ai_mode) {
@@ -391,7 +404,9 @@ function onHandClick(name) {
 
 async function onBoardClick(x, y) {
     if (gameState.game_over) return;
-    if (gameState.turn !== SENTE && !gameState.ai_vs_ai_mode) return;
+    // 人間 vs AI モード（vs_ai=true）では先手のみプレイ可能（後手はAI）
+    // 人間対人間モード（vs_ai=false かつ ai_vs_ai=false）では両方プレイ可能
+    if (gameState.vs_ai && gameState.turn !== SENTE) return;
 
     // In AI/Mixed mode, prevent human from moving if it's not their turn
     if (gameState.ai_vs_ai_mode) {
@@ -547,7 +562,180 @@ function closeMessage(event) {
     }
 }
 
-// TTS Audio Playback and Save Functions
+// ========== IndexedDB TTS Management ==========
+let ttsDB = null;
+
+async function initTtsDB() {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open('ShogiTTS', 1);
+
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => {
+            ttsDB = request.result;
+            resolve(ttsDB);
+        };
+
+        request.onupgradeneeded = (event) => {
+            const db = event.target.result;
+            if (!db.objectStoreNames.contains('audioFiles')) {
+                const objectStore = db.createObjectStore('audioFiles', { keyPath: 'id' });
+                objectStore.createIndex('matchId', 'matchId', { unique: false });
+            }
+        };
+    });
+}
+
+async function saveTtsToIndexedDB(matchId, moveCount, filename, base64Audio) {
+    if (!ttsDB) await initTtsDB();
+
+    return new Promise((resolve, reject) => {
+        const transaction = ttsDB.transaction(['audioFiles'], 'readwrite');
+        const objectStore = transaction.objectStore('audioFiles');
+
+        const data = {
+            id: `${matchId}_${String(moveCount).padStart(3, '0')}`,
+            matchId: matchId,
+            moveCount: moveCount,
+            filename: filename,
+            audioData: base64Audio,
+            timestamp: Date.now()
+        };
+
+        const request = objectStore.put(data);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+    });
+}
+
+async function getTtsFilesForMatch(matchId) {
+    if (!ttsDB) await initTtsDB();
+
+    return new Promise((resolve, reject) => {
+        const transaction = ttsDB.transaction(['audioFiles'], 'readonly');
+        const objectStore = transaction.objectStore('audioFiles');
+        const index = objectStore.index('matchId');
+        const request = index.getAll(matchId);
+
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+async function clearTtsForMatch(matchId) {
+    if (!ttsDB) await initTtsDB();
+
+    return new Promise((resolve, reject) => {
+        const transaction = ttsDB.transaction(['audioFiles'], 'readwrite');
+        const objectStore = transaction.objectStore('audioFiles');
+        const index = objectStore.index('matchId');
+        const request = index.openCursor(IDBKeyRange.only(matchId));
+
+        request.onsuccess = (event) => {
+            const cursor = event.target.result;
+            if (cursor) {
+                cursor.delete();
+                cursor.continue();
+            } else {
+                resolve();
+            }
+        };
+        request.onerror = () => reject(request.error);
+    });
+}
+
+async function downloadMatchAudio() {
+    if (!currentMatchId) {
+        showMessage('対局IDが見つかりません');
+        return;
+    }
+
+    try {
+        const files = await getTtsFilesForMatch(currentMatchId);
+
+        if (!files || files.length === 0) {
+            showMessage('保存された音声ファイルがありません');
+            return;
+        }
+
+        // Sort by moveCount
+        files.sort((a, b) => a.moveCount - b.moveCount);
+
+        // Create ZIP
+        const zip = new JSZip();
+
+        for (const file of files) {
+            // Convert base64 to binary
+            const binaryString = atob(file.audioData);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+
+            // Create WAV file
+            const wavData = createWavFile(bytes);
+            zip.file(file.filename, wavData);
+        }
+
+        // Generate ZIP and download
+        const zipBlob = await zip.generateAsync({ type: 'blob' });
+        const url = URL.createObjectURL(zipBlob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${gMatchPrefix}_audio.zip`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        console.log(`Downloaded ${files.length} audio files as ZIP`);
+
+        // Clear IndexedDB after download
+        await clearTtsForMatch(currentMatchId);
+
+        // Hide download button
+        const btn = document.getElementById('download-audio-btn');
+        if (btn) btn.style.display = 'none';
+
+    } catch (e) {
+        console.error('Download error:', e);
+        showMessage('ダウンロードエラー: ' + e.message);
+    }
+}
+
+function createWavFile(pcmData) {
+    const sampleRate = 24000;
+    const numChannels = 1;
+    const bitsPerSample = 16;
+    const byteRate = sampleRate * numChannels * bitsPerSample / 8;
+    const blockAlign = numChannels * bitsPerSample / 8;
+    const dataSize = pcmData.length;
+    const headerSize = 44;
+    const fileSize = headerSize + dataSize - 8;
+
+    const wavBuffer = new ArrayBuffer(headerSize + dataSize);
+    const view = new DataView(wavBuffer);
+
+    writeString(view, 0, 'RIFF');
+    view.setUint32(4, fileSize, true);
+    writeString(view, 8, 'WAVE');
+    writeString(view, 12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, byteRate, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitsPerSample, true);
+    writeString(view, 36, 'data');
+    view.setUint32(40, dataSize, true);
+
+    const wavBytes = new Uint8Array(wavBuffer);
+    wavBytes.set(pcmData, headerSize);
+
+    return wavBytes;
+}
+
+// ========== TTS Audio Playback and Save Functions ==========
 function playTtsAudio(base64Audio) {
     if (!base64Audio) return;
     try {
@@ -601,39 +789,22 @@ function writeString(view, offset, string) {
 
 function saveTtsAudioFile(base64Audio, moveCount, moveStr) {
     if (!base64Audio) return;
+
     try {
+        // Decode base64 to binary
         const binaryString = atob(base64Audio);
         const bytes = new Uint8Array(binaryString.length);
         for (let i = 0; i < binaryString.length; i++) {
             bytes[i] = binaryString.charCodeAt(i);
         }
-        const sampleRate = 24000;
-        const numChannels = 1;
-        const bitsPerSample = 16;
-        const byteRate = sampleRate * numChannels * bitsPerSample / 8;
-        const blockAlign = numChannels * bitsPerSample / 8;
-        const dataSize = bytes.length;
-        const headerSize = 44;
-        const fileSize = headerSize + dataSize - 8;
-        const wavBuffer = new ArrayBuffer(headerSize + dataSize);
-        const view = new DataView(wavBuffer);
-        writeString(view, 0, 'RIFF');
-        view.setUint32(4, fileSize, true);
-        writeString(view, 8, 'WAVE');
-        writeString(view, 12, 'fmt ');
-        view.setUint32(16, 16, true);
-        view.setUint16(20, 1, true);
-        view.setUint16(22, numChannels, true);
-        view.setUint32(24, sampleRate, true);
-        view.setUint32(28, byteRate, true);
-        view.setUint16(32, blockAlign, true);
-        view.setUint16(34, bitsPerSample, true);
-        writeString(view, 36, 'data');
-        view.setUint32(40, dataSize, true);
-        const wavBytes = new Uint8Array(wavBuffer);
-        wavBytes.set(bytes, headerSize);
+
+        // Create WAV file
+        const wavData = createWavFile(bytes);
+
+        // Generate filename
         const paddedCount = String(moveCount).padStart(3, '0');
         const cleanMoveStr = moveStr.replace(/[\/\\:*?"<>|]/g, '');
+
         let filename;
         if (typeof gMatchPrefix !== 'undefined' && gMatchPrefix) {
             filename = `${gMatchPrefix}_${paddedCount}_${cleanMoveStr}.wav`;
@@ -644,7 +815,9 @@ function saveTtsAudioFile(base64Audio, moveCount, moveStr) {
                 String(now.getDate()).padStart(2, '0');
             filename = `${paddedCount}_${cleanMoveStr}_${dateStr}.wav`;
         }
-        const blob = new Blob([wavBuffer], { type: 'audio/wav' });
+
+        // Immediate download
+        const blob = new Blob([wavData], { type: 'audio/wav' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -653,7 +826,8 @@ function saveTtsAudioFile(base64Audio, moveCount, moveStr) {
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
-        console.log(`TTS: Saved audio file: ${filename}`);
+
+        console.log(`TTS: Downloaded audio file: ${filename}`);
     } catch (e) {
         console.error('TTS save error:', e);
     }
@@ -875,6 +1049,10 @@ async function processAiVsAi(matchId) {
                 if (gTtsSaveFile && result.move_str_ja) {
                     saveTtsAudioFile(result.tts_audio, result.move_count, result.move_str_ja);
                 }
+            } else if (result.tts_error) {
+                console.error("TTS ERROR:", result.tts_error);
+            } else if (gTtsEnabled) {
+                console.warn("TTS: No audio in response (TTS may have failed silently)");
             }
 
             // Loop continue

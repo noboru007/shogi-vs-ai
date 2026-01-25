@@ -37,23 +37,23 @@ DEFAULT_GOTE_MODEL = "gemini-2.5-pro"
 # Each entry: system_prompt for voice style, voice name from Gemini TTS
 TTS_VOICE_CONFIG = {
     "gemini-3-pro-preview": {
-        "system_prompt": "将棋を指している両者が、自分の手の解説をします。10代の明るくフレンドリー声のトーンで。",
+        "system_prompt": "将棋の解説をする。18歳の高音の声で、フレンドリーで楽しそうなトーンで。",
         "voice": "Leda"
     },
     "gemini-3-flash-preview": {
-        "system_prompt": "将棋を指している両者が、自分の手の解説をします。10代の明るくフレンドリー声のトーンで。",
+        "system_prompt": "将棋の解説をする。18歳の高音の声で、フレンドリーで楽しそうなトーンで。",
         "voice": "Leda"
     },
     "gpt-5.2": {
-        "system_prompt": "将棋を指している両者が、自分の手の解説をします。20代の艶やかな声のトーンで。",
-        "voice": "Erinome"
+        "system_prompt": "将棋の解説をする。28歳の、恋人に甘えるピロートークのトーンで。",
+        "voice": "Leda"
     },
     "gpt-5.2-high": {
-        "system_prompt": "将棋を指している両者が、自分の手の解説をします。20代の艶やかな声のトーンで。",
-        "voice": "Erinome"
+        "system_prompt": "将棋の解説をする。28歳の、恋人に甘えるピロートークのトーンで。",
+        "voice": "Despina"
     },
     "default": {
-        "system_prompt": "将棋を指している両者が、自分の手の解説をします。",
+        "system_prompt": "",
         "voice": "Sadaltager"
     }
 }
@@ -111,6 +111,7 @@ def generate_tts_audio(text, model_name, turn, is_fallback=False):
         }],
         "generationConfig": {
             "responseModalities": ["AUDIO"],
+            "temperature": 0.5,
             "speechConfig": {
                 "voiceConfig": {
                     "prebuiltVoiceConfig": {
@@ -577,7 +578,7 @@ def llm_move():
         system_prompt_format = f"""
         回答フォーマット:
         Move: [USI Move]（例：7g7f、G*5h。持ち駒がない場合は打てません）
-        解説: [この一手を選んだ理由を後付けの日本語で2行以内]
+        解説: [この一手を選んだ理由を後付けのフレンドリーな**日本語**で3行以内。「2bと」ではなく、「2二と」のように表記してください。]
         """
         # User Prompt: Current State
         user_prompt_basic = f"""
@@ -1007,6 +1008,8 @@ def llm_move():
                     tts_audio = generate_tts_audio(tts_text, model_name, turn, is_fallback=False)
                     if tts_audio:
                         response_data['tts_audio'] = tts_audio
+                    else:
+                        response_data['tts_error'] = "TTS generation failed (quota exceeded or API error)"
                 
                 return jsonify(response_data)
 
@@ -1055,7 +1058,7 @@ def llm_move():
         if tts_enabled and move_str_ja:
             turn_str = "先手" if turn == SENTE else "後手"
             # Special fallback message format
-            tts_text = f"{turn_str}が違法手を打とうとしたため、CPUが代打ちしました。{move_str_ja}。{turn_str}の一手と理由：{last_error}"
+            tts_text = f"{turn_str}が違法手を選択したため、CPUが代打ちしました。{move_str_ja}。{turn_str}の一手と理由：{last_error}"
             tts_audio = generate_tts_audio(tts_text, model_name, turn, is_fallback=True)
             if tts_audio:
                 response_data['tts_audio'] = tts_audio
