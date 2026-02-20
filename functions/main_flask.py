@@ -36,6 +36,10 @@ DEFAULT_GOTE_MODEL = "gemini-2.5-pro"
 # TTS Voice Settings per LLM model
 # Each entry: system_prompt for voice style, voice name from Gemini TTS
 TTS_VOICE_CONFIG = {
+    "gemini-3.1-pro-preview": {
+        "system_prompt": "将棋の解説をする。18歳の高音の声で、フレンドリーで楽しそうなトーンで。",
+        "voice": "Leda"
+    },
     "gemini-3-pro-preview": {
         "system_prompt": "将棋の解説をする。18歳の高音の声で、フレンドリーで楽しそうなトーンで。",
         "voice": "Leda"
@@ -574,6 +578,9 @@ def llm_move():
         ※この際、自玉に王手がかかっている場合、それを回避しない手は違法手として除外すること。
         3. 選択した最善手（Move）と、その回答を以下の回答フォーマットの形式で出力する。
         4. 最終的な回答は回答フォーマットに違反せず、指定されたUSI形式のみを出力すること。挨拶など余計な文章の出力は禁止する。
+
+        制約：
+        1. 回答は必ず日本語出力すること
         """
         system_prompt_format = f"""
         回答フォーマット:
@@ -783,9 +790,10 @@ def llm_move():
                     # Gemini Call
                     log_info("DEBUG: Configuring Gemini Model...")
                     
-                    if enable_high_reasoning:
+                    if enable_high_reasoning or enable_medium_reasoning or enable_low_reasoning:
                         # Use REST API directly to bypass SDK validation issues with 'thinking_config'
                         # URL: https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={API_KEY}
+                        thinking_level = "high" if enable_high_reasoning else "medium" if enable_medium_reasoning else "low"
                         google_api_key = os.getenv("GOOGLE_API_KEY")
                         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={google_api_key}"
                         
@@ -797,7 +805,7 @@ def llm_move():
                             "generationConfig": {
                                 "thinkingConfig": {
                                     "includeThoughts": True,
-                                    "thinkingLevel": "HIGH"
+                                    "thinkingLevel": thinking_level
                                 }
                             }
                         }
@@ -812,7 +820,7 @@ def llm_move():
                             "parts": [{"text": current_user_prompt}]
                         }]
 
-                        log_info(f"DEBUG: Calling Gemini REST API: {url} with Thinking")
+                        log_info(f"DEBUG: Calling Gemini REST API: {url} with Thinking (Level: {thinking_level})")
                         # Add timeout for Gemini (1200s for High Reasoning)
                         resp = requests.post(url, headers=headers, json=payload, timeout=1200)
                         
