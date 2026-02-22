@@ -416,7 +416,8 @@ def cpu_move():
     is_maximizing = (game.turn == GOTE)
     
     try:
-        best_val, best_move = game.minimax(game, CPU_DEPTH, -float('inf'), float('inf'), is_maximizing)
+        log_info("CPU Thinking (Iterative Deepening)...")
+        best_val, best_move = game.iterative_deepening(is_maximizing)
         if best_move:
             # Generate JP string BEFORE making move (to see source piece)
             move_str_ja = get_japanese_move_str(game, best_move)

@@ -1,11 +1,11 @@
 import copy
 import random
+import time
 
 # === 設定 ===
-# 読みの深さ（2=自分->相手まで読む）
-# === 設定 ===
-# 読みの深さ（2=自分->相手まで読む）
-CPU_DEPTH = 2
+CPU_DEPTH = 3           # 最大探索深度
+CPU_TIME_LIMIT = 30     # 制限時間（秒）- 反復深化で時間内に最大限深く読む
+QUIESCENCE_DEPTH = 4    # 静止探索の最大深度
 
 # 定数定義
 BOARD_SIZE = 9
@@ -27,8 +27,105 @@ SFEN_MAP = {
 
 # === 駒の価値 ===
 PIECE_VALUES = {
-    "歩": 100, "香": 300, "桂": 400, "銀": 500, "金": 600, "角": 800, "飛": 1000, "王": 15000,
-    "と": 600, "杏": 600, "圭": 600, "全": 600, "馬": 1000, "竜": 1200
+    "歩": 90, "香": 315, "桂": 405, "銀": 495, "金": 540, "角": 855, "飛": 990, "王": 15000,
+    "と": 540, "杏": 540, "圭": 540, "全": 540, "馬": 1100, "竜": 1395
+}
+
+# === 駒の位置評価テーブル (先手視点, y=0が敵陣1段目) ===
+# 歩: 敵陣に近いほど高評価、3段目到達でボーナス
+PST_PAWN = [
+    [0,  0,  0,  0,  0,  0,  0,  0,  0],  # y=0 (成れるはず)
+    [15, 15, 15, 15, 15, 15, 15, 15, 15],  # y=1
+    [10, 10, 12, 15, 20, 15, 12, 10, 10],  # y=2 (敵陣3段目)
+    [5,  5,  8,  12, 15, 12,  8,  5,  5],  # y=3
+    [2,  2,  5,   8, 10,  8,  5,  2,  2],  # y=4 (中央)
+    [0,  0,  2,   5,  5,  5,  2,  0,  0],  # y=5
+    [0,  0,  0,   0,  0,  0,  0,  0,  0],  # y=6 (初期位置)
+    [0,  0,  0,   0,  0,  0,  0,  0,  0],  # y=7
+    [0,  0,  0,   0,  0,  0,  0,  0,  0],  # y=8
+]
+
+# 飛車: 中央ファイルや2筋が強い
+PST_ROOK = [
+    [5,  10, 5,  5,  5,  5,  5,  10, 5],
+    [10, 15, 10, 10, 10, 10, 10, 15, 10],
+    [5,  10, 8,  8,  8,  8,  8,  10, 5],
+    [5,  5,  5,  5,  5,  5,  5,  5,  5],
+    [0,  0,  0,  0,  5,  0,  0,  0,  0],
+    [0,  0,  0,  0,  0,  0,  0,  0,  0],
+    [0,  0,  0,  0,  0,  0,  0,  0,  0],
+    [-5, 0,  0,  0,  0,  0,  0,  0, -5],
+    [-5, 0,  0,  0,  0,  0,  0,  0, -5],
+]
+
+# 角: 中央寄りが有利
+PST_BISHOP = [
+    [0,  0,  0,  0,  0,  0,  0,  0,  0],
+    [0,  5,  0,  0,  0,  0,  0,  5,  0],
+    [0,  0,  8,  0,  0,  0,  8,  0,  0],
+    [0,  0,  0,  10, 0,  10, 0,  0,  0],
+    [0,  0,  0,  0,  15, 0,  0,  0,  0],
+    [0,  0,  0,  10, 0,  10, 0,  0,  0],
+    [0,  0,  8,  0,  0,  0,  8,  0,  0],
+    [0,  5,  0,  0,  0,  0,  0,  5,  0],
+    [0,  0,  0,  0,  0,  0,  0,  0,  0],
+]
+
+# 金: 自玉付近で守備力を発揮
+PST_GOLD = [
+    [0,  0,  0,  0,  0,  0,  0,  0,  0],
+    [0,  0,  0,  0,  0,  0,  0,  0,  0],
+    [0,  0,  0,  0,  5,  0,  0,  0,  0],
+    [0,  0,  0,  5,  5,  5,  0,  0,  0],
+    [0,  0,  0,  0,  0,  0,  0,  0,  0],
+    [0,  0,  5,  5,  5,  5,  5,  0,  0],
+    [0,  5,  8,  10, 10, 10, 8,  5,  0],
+    [5,  8,  10, 12, 10, 12, 10, 8,  5],
+    [5,  5,  8,  10, 5,  10, 8,  5,  5],
+]
+
+# 銀: 攻めにも守りにも使える
+PST_SILVER = [
+    [0,  0,  0,  0,  0,  0,  0,  0,  0],
+    [0,  5,  5,  5,  5,  5,  5,  5,  0],
+    [0,  5,  8,  8,  10, 8,  8,  5,  0],
+    [0,  0,  5,  8,  8,  8,  5,  0,  0],
+    [0,  0,  0,  5,  5,  5,  0,  0,  0],
+    [0,  0,  5,  5,  5,  5,  5,  0,  0],
+    [0,  5,  8,  8,  5,  8,  8,  5,  0],
+    [5,  8,  10, 8,  5,  8,  10, 8,  5],
+    [0,  5,  5,  5,  0,  5,  5,  5,  0],
+]
+
+# 王: 自陣の端に近い方が安全（囲い寄り）
+PST_KING = [
+    [-30,-20,-20,-20,-20,-20,-20,-20,-30],
+    [-20,-15,-15,-15,-15,-15,-15,-15,-20],
+    [-15,-10,-10,-10,-10,-10,-10,-10,-15],
+    [-10, -5, -5, -5, -5, -5, -5, -5,-10],
+    [-5,  0,  0,  0,  0,  0,  0,  0, -5],
+    [0,   5,  5,  5,  0,  5,  5,  5,  0],
+    [5,  10, 10, 10,  0, 10, 10, 10,  5],
+    [10, 15, 15, 10,  5, 10, 15, 15, 10],
+    [15, 20, 15, 10,  5, 10, 15, 20, 15],
+]
+
+# 駒名 -> PST のマッピング
+PST_MAP = {
+    "歩": PST_PAWN, "香": PST_PAWN,  # 香も前進する駒なので歩と同様
+    "桂": PST_PAWN,
+    "銀": PST_SILVER, "金": PST_GOLD,
+    "角": PST_BISHOP, "飛": PST_ROOK,
+    "王": PST_KING,
+    # 成駒は金と同等の扱い
+    "と": PST_GOLD, "杏": PST_GOLD, "圭": PST_GOLD, "全": PST_GOLD,
+    # 馬・竜は中央が強い
+    "馬": PST_BISHOP, "竜": PST_ROOK,
+}
+
+# 成駒のマッピング (元駒 -> 成駒)
+UNPROMOTION_MAP = {
+    "と": "歩", "杏": "香", "圭": "桂", "全": "銀", "馬": "角", "竜": "飛"
 }
 
 # 駒の動き定義
@@ -69,6 +166,10 @@ class ShogiGame:
         self.game_over = False 
         self.move_count = 1
         self.last_move = None
+        self._search_start_time = 0
+        self._search_time_limit = CPU_TIME_LIMIT
+        self._search_aborted = False
+        self._nodes_searched = 0
         self.init_board()
 
     def init_board(self):
@@ -351,58 +452,189 @@ class ShogiGame:
         return moves
 
     def evaluate_board(self):
+        """強化版評価関数: 駒価値 + 位置評価 + 玉安全度 + 防御評価 + 終盤補正"""
         score = 0
+
+        # --- 盤面の駒の総価値で終盤判定 ---
+        total_material = 0
+        for y in range(BOARD_SIZE):
+            for x in range(BOARD_SIZE):
+                p = self.board[y][x]
+                if p and p["name"] != "王":
+                    total_material += PIECE_VALUES.get(p["name"], 0)
+        for owner in [SENTE, GOTE]:
+            for name, count in self.hands[owner].items():
+                total_material += PIECE_VALUES.get(name, 0) * count
+        is_endgame = total_material < 4000
+
+        # --- 1. 駒価値 + 位置評価 ---
         for y in range(BOARD_SIZE):
             for x in range(BOARD_SIZE):
                 p = self.board[y][x]
                 if p:
                     val = PIECE_VALUES.get(p["name"], 0)
-                    
-                    # Position Bonus: Advance towards enemy
-                    # Sente (1) wants y -> 0. Gote (-1) wants y -> 8.
-                    # Simple bonus: 5 points per rank advanced
+
+                    # 位置評価テーブルの参照
+                    pst = PST_MAP.get(p["name"])
                     pos_bonus = 0
-                    if p["owner"] == SENTE:
-                         pos_bonus = (8 - y) * 5
-                    else: # GOTE
-                         pos_bonus = y * 5
-                         
-                    if p["owner"] == GOTE: score += (val + pos_bonus)
-                    else: score -= (val + pos_bonus)
-        
-        # King Safety (Simplified)
-        # Bonus for defenders around the King
+                    if pst:
+                        if p["owner"] == SENTE:
+                            pos_bonus = pst[y][x]
+                        else:  # GOTE: テーブルを上下反転
+                            pos_bonus = pst[8 - y][8 - x]
+
+                    if p["owner"] == GOTE:
+                        score += (val + pos_bonus)
+                    else:
+                        score -= (val + pos_bonus)
+
+        # --- 2. 玉の安全度（大幅強化版） ---
         for owner in [SENTE, GOTE]:
             k_pos = self.find_king(owner)
-            if k_pos:
-                kx, ky = k_pos
-                safety_score = 0
-                # Check 3x3 area around King
-                for dy in [-1, 0, 1]:
-                    for dx in [-1, 0, 1]:
-                        if dx == 0 and dy == 0: continue
-                        tx, ty = kx + dx, ky + dy
-                        if 0 <= tx < BOARD_SIZE and 0 <= ty < BOARD_SIZE:
-                            tp = self.board[ty][tx]
-                            if tp and tp["owner"] == owner:
-                                # Friendly piece near King -> Good defender
-                                if tp["name"] in ["金", "銀", "香", "馬", "竜"]:
-                                     safety_score += 200 # Significant bonus
-                                else:
-                                     safety_score += 50 # Minor bonus
-                
-                if owner == GOTE: score += safety_score
-                else: score -= safety_score
+            if not k_pos:
+                continue
+            kx, ky = k_pos
+            safety_score = 0
+            opponent = owner * -1
+            sign = 1 if owner == GOTE else -1
 
-        # Hand Valuation: 1.4x to discourage reckless drops
-        # Holding a piece is potential power. Dropping it loses that flexibility.
-        hand_multiplier = 1.4
-        
+            # 2a. 玉周辺の味方駒ボーナス + 空きマスペナルティ（3x3）
+            defender_values = {"金": 250, "銀": 200, "全": 200, "と": 180,
+                               "杏": 150, "圭": 150, "馬": 120, "竜": 120,
+                               "歩": 60, "香": 80, "桂": 40}
+            empty_near_king = 0
+            for dy_k in [-1, 0, 1]:
+                for dx_k in [-1, 0, 1]:
+                    if dx_k == 0 and dy_k == 0:
+                        continue
+                    tx, ty = kx + dx_k, ky + dy_k
+                    if 0 <= tx < BOARD_SIZE and 0 <= ty < BOARD_SIZE:
+                        tp = self.board[ty][tx]
+                        if tp and tp["owner"] == owner:
+                            safety_score += defender_values.get(tp["name"], 50)
+                        elif tp is None:
+                            empty_near_king += 1
+                    # 盤外は安全とみなす（端の玉は逃げ場が少ないが壁がある）
+
+            # 空きマスが多い = 守りが薄い（ペナルティ）
+            if empty_near_king >= 5:
+                safety_score -= 200
+            elif empty_near_king >= 3:
+                safety_score -= 80
+
+            # 2b. 敵の大駒の脅威（飛角竜馬）
+            for y2 in range(BOARD_SIZE):
+                for x2 in range(BOARD_SIZE):
+                    ep = self.board[y2][x2]
+                    if ep and ep["owner"] == opponent:
+                        if ep["name"] in ["飛", "竜"]:
+                            # 同じ行 or 同じ列 → ラインアタック
+                            if x2 == kx or y2 == ky:
+                                dist = abs(x2 - kx) + abs(y2 - ky)
+                                safety_score -= max(0, 400 - dist * 30)
+                            # 竜は隣接もチェック（全方向に動けるので）
+                            if ep["name"] == "竜":
+                                dist = max(abs(x2 - kx), abs(y2 - ky))
+                                if dist <= 2:
+                                    safety_score -= 300
+                        if ep["name"] in ["角", "馬"]:
+                            # 同じ対角線
+                            if abs(x2 - kx) == abs(y2 - ky) and x2 != kx:
+                                dist = abs(x2 - kx)
+                                safety_score -= max(0, 300 - dist * 25)
+                            # 馬は隣接もチェック
+                            if ep["name"] == "馬":
+                                dist = max(abs(x2 - kx), abs(y2 - ky))
+                                if dist <= 2:
+                                    safety_score -= 250
+
+            # 2c. 玉が端にいることのボーナス（自陣のみ）
+            if owner == SENTE and ky >= 7:
+                if kx <= 1 or kx >= 7:
+                    safety_score += 80
+            elif owner == GOTE and ky <= 1:
+                if kx <= 1 or kx >= 7:
+                    safety_score += 80
+
+            score += safety_score * sign
+
+        # --- 3. 敵大駒の自陣侵入ペナルティ ---
+        # 相手の飛角竜馬が自陣にいると非常に危険
+        invasion_penalty = {"飛": 600, "竜": 900, "角": 400, "馬": 700}
+        for y in range(BOARD_SIZE):
+            for x in range(BOARD_SIZE):
+                p = self.board[y][x]
+                if p and p["name"] in invasion_penalty:
+                    penalty = invasion_penalty[p["name"]]
+                    if p["owner"] == SENTE:
+                        # 先手の大駒が後手陣(y<=2)にいる → 後手にとって脅威
+                        if y <= 2:
+                            depth_bonus = (2 - y) * 100  # 奥に入るほど危険
+                            score -= (penalty + depth_bonus)  # 先手有利
+                    else:  # GOTE
+                        # 後手の大駒が先手陣(y>=6)にいる → 先手にとって脅威
+                        if y >= 6:
+                            depth_bonus = (y - 6) * 100
+                            score += (penalty + depth_bonus)  # 後手有利
+
+        # --- 4. 玉前面の歩の防壁チェック ---
+        # 玉の前の筋に歩がない（飛車先が空いている）= 危険
+        for owner in [SENTE, GOTE]:
+            k_pos = self.find_king(owner)
+            if not k_pos:
+                continue
+            kx, ky = k_pos
+            sign = 1 if owner == GOTE else -1
+
+            # 玉の前方3筋をチェック（自分の歩があるか）
+            pawn_shield = 0
+            for dx in [-1, 0, 1]:
+                col = kx + dx
+                if col < 0 or col >= BOARD_SIZE:
+                    pawn_shield += 1  # 盤外はOK
+                    continue
+                has_pawn = False
+                # 先手なら前方(y小さい方)、後手なら前方(y大きい方)
+                if owner == SENTE:
+                    for check_y in range(ky - 1, -1, -1):
+                        p = self.board[check_y][col]
+                        if p and p["owner"] == owner and p["name"] == "歩":
+                            has_pawn = True
+                            break
+                        if p and p["owner"] != owner:
+                            break  # 相手の駒に遮られている
+                else:
+                    for check_y in range(ky + 1, BOARD_SIZE):
+                        p = self.board[check_y][col]
+                        if p and p["owner"] == owner and p["name"] == "歩":
+                            has_pawn = True
+                            break
+                        if p and p["owner"] != owner:
+                            break
+                if has_pawn:
+                    pawn_shield += 1
+
+            if pawn_shield == 0:
+                score += sign * (-300)  # 3筋とも歩なし = 非常に危険
+            elif pawn_shield == 1:
+                score += sign * (-150)  # 2筋の歩がない
+            elif pawn_shield == 2:
+                score += sign * (-50)   # 1筋の歩がない
+
+        # --- 5. 王手状態のペナルティ ---
+        # 自分が王手されている = 非常に悪い局面
+        for owner in [SENTE, GOTE]:
+            if self.is_king_in_check(owner):
+                sign = 1 if owner == GOTE else -1
+                score += sign * (-500)
+
+        # --- 6. 持ち駒の評価 ---
+        hand_multiplier = 1.6 if is_endgame else 1.3
         for name, count in self.hands[GOTE].items():
             score += PIECE_VALUES.get(name, 0) * count * hand_multiplier
         for name, count in self.hands[SENTE].items():
             score -= PIECE_VALUES.get(name, 0) * count * hand_multiplier
-            
+
         return score
 
     # === JSON Serialization for Firestore ===
@@ -561,68 +793,305 @@ class ShogiGame:
             # Fallback to init? Or raise?
             raise e
 
-    def minimax(self, game_state, depth, alpha, beta, maximizing):
-        legal_moves = game_state.get_legal_moves(GOTE if maximizing else SENTE)
-        
-        # Base Case with Check Extension
-        if depth <= 0:
-            current_turn = GOTE if maximizing else SENTE
-            # If in check at depth 0, extend search by 1 ply to see resolution
-            # Limit extension to avoid infinite recursion (depth -1 means already extended?)
-            # Simplified: Allow finding a move to escape check.
-            is_in_check = game_state.is_king_in_check(current_turn)
-            
-            # Note: valid moves usually handle escape. 
-            # If legal_moves is empty => Mate. evaluate_board doesn't know mate.
-            if not legal_moves:
-                # Mate detection
-                return (-99999 if maximizing else 99999), None
-                
-            if not is_in_check:
-                return game_state.evaluate_board(), None
-            else:
-                # Extend 1 ply for check resolution
-                # To prevent infinite depth, we treat depth 0 as "check extension allowed"
-                # and depth -1 as "stop".
-                if depth == 0:
-                     depth = 1 # Extend!
-                else: 
-                     return game_state.evaluate_board(), None
+    def _apply_move(self, move, owner):
+        """手を適用し、undo情報を返す（copy.deepcopy不要の高速化）"""
+        ex, ey = move["to"]
+        undo = {"move": move, "owner": owner, "captured": None,
+                "old_last_move": self.last_move}
 
-        # Sort moves for Alpha-Beta pruning efficiency
-        # Heuristic: Captures first?
-        # For now, simple shuffle is okay, or sort by standard eval? 
-        random.shuffle(legal_moves)
-        best_move = None
-        if maximizing: 
-            max_eval = -float('inf')
-            for move in legal_moves:
-                next_state = copy.deepcopy(game_state)
-                if move["type"] == "move":
-                    next_state.make_move("move", move["from"], move["to"], GOTE, move["promote"])
+        if move["type"] == "move":
+            sx, sy = move["from"]
+            piece = self.board[sy][sx]
+            undo["src_piece"] = piece
+            captured = self.board[ey][ex]
+            undo["captured"] = captured
+
+            self.board[sy][sx] = None
+            if move["promote"]:
+                name = PIECES[piece["name"]]["promote"]
+            else:
+                name = piece["name"]
+            self.board[ey][ex] = {"name": name, "owner": owner}
+
+            if captured:
+                cap_name = UNPROMOTION_MAP.get(captured["name"], captured["name"])
+                if cap_name in self.hands[owner]:
+                    self.hands[owner][cap_name] += 1
                 else:
-                    next_state.make_move("drop", move["name"], move["to"], GOTE)
-                next_state.switch_turn()
-                eval_score, _ = self.minimax(next_state, depth - 1, alpha, beta, False)
+                    self.hands[owner][cap_name] = 1
+                undo["cap_original"] = cap_name
+        else:  # drop
+            name = move["name"]
+            self.board[ey][ex] = {"name": name, "owner": owner}
+            self.hands[owner][name] -= 1
+
+        self.last_move = {"to": (ex, ey), "owner": owner}
+        self.turn *= -1
+        self.move_count += 1
+        return undo
+
+    def _undo_move(self, undo):
+        """_apply_moveで得たundo情報から手を元に戻す"""
+        move = undo["move"]
+        owner = undo["owner"]
+        ex, ey = move["to"]
+
+        self.turn *= -1
+        self.move_count -= 1
+        self.last_move = undo["old_last_move"]
+
+        if move["type"] == "move":
+            sx, sy = move["from"]
+            self.board[sy][sx] = undo["src_piece"]
+            self.board[ey][ex] = undo["captured"]
+
+            if undo["captured"]:
+                cap_name = undo["cap_original"]
+                self.hands[owner][cap_name] -= 1
+                if self.hands[owner][cap_name] == 0:
+                    del self.hands[owner][cap_name]
+        else:  # drop
+            name = move["name"]
+            self.board[ey][ex] = None
+            self.hands[owner][name] = self.hands[owner].get(name, 0) + 1
+
+    def _score_move(self, move, owner):
+        """手の順序付けのためのスコアリング（MVV-LVA + 成り優先）"""
+        score = 0
+        ex, ey = move["to"]
+
+        if move["type"] == "move":
+            # 駒取りの手: MVV-LVA (Most Valuable Victim - Least Valuable Attacker)
+            target = self.board[ey][ex]
+            if target and target["owner"] != owner:
+                victim_val = PIECE_VALUES.get(target["name"], 0)
+                sx, sy = move["from"]
+                attacker = self.board[sy][sx]
+                attacker_val = PIECE_VALUES.get(attacker["name"], 0) if attacker else 0
+                score += 10000 + victim_val * 10 - attacker_val
+
+            # 成りの手
+            if move.get("promote"):
+                sx, sy = move["from"]
+                piece = self.board[sy][sx]
+                if piece:
+                    promoted_name = PIECES[piece["name"]].get("promote")
+                    if promoted_name:
+                        score += 5000 + (PIECE_VALUES.get(promoted_name, 0) - PIECE_VALUES.get(piece["name"], 0))
+        else:  # drop
+            # 打ち込みは中程度の優先度
+            score += 100
+            # 敵陣への打ち込みはボーナス
+            if owner == SENTE and ey <= 2:
+                score += 200
+            elif owner == GOTE and ey >= 6:
+                score += 200
+
+        return score
+
+    def _order_moves(self, moves, owner):
+        """手を評価順にソート（alpha-beta枝刈りの効率化）"""
+        scored = [(self._score_move(m, owner), random.random(), m) for m in moves]
+        scored.sort(key=lambda x: (-x[0], x[1]))  # スコア降順、同点はランダム
+        return [m for _, _, m in scored]
+
+    def _quiescence_search(self, alpha, beta, maximizing, depth):
+        """静止探索: 駒取りの手だけを追加探索して交換を正確に評価"""
+        stand_pat = self.evaluate_board()
+
+        if depth <= 0:
+            return stand_pat
+
+        if maximizing:
+            if stand_pat >= beta:
+                return beta
+            if stand_pat > alpha:
+                alpha = stand_pat
+
+            owner = GOTE
+            # 駒取りの手だけを生成
+            captures = []
+            for y in range(BOARD_SIZE):
+                for x in range(BOARD_SIZE):
+                    p = self.board[y][x]
+                    if p and p["owner"] == owner:
+                        for ty in range(BOARD_SIZE):
+                            for tx in range(BOARD_SIZE):
+                                target = self.board[ty][tx]
+                                if target and target["owner"] != owner:
+                                    if self.is_pseudo_valid_move((x, y), (tx, ty), p, owner):
+                                        can_pm = self.can_promote(y, ty, owner, p["name"])
+                                        if self.simulate_move_check("move", (x, y), (tx, ty), owner, promote=False):
+                                            captures.append({"type": "move", "from": (x, y), "to": (tx, ty), "promote": False})
+                                        if can_pm:
+                                            if self.simulate_move_check("move", (x, y), (tx, ty), owner, promote=True):
+                                                captures.append({"type": "move", "from": (x, y), "to": (tx, ty), "promote": True})
+
+            captures = self._order_moves(captures, owner)
+            for move in captures:
+                undo = self._apply_move(move, owner)
+                eval_score = self._quiescence_search(alpha, beta, False, depth - 1)
+                self._undo_move(undo)
+
+                if eval_score >= beta:
+                    return beta
+                if eval_score > alpha:
+                    alpha = eval_score
+            return alpha
+        else:
+            if stand_pat <= alpha:
+                return alpha
+            if stand_pat < beta:
+                beta = stand_pat
+
+            owner = SENTE
+            captures = []
+            for y in range(BOARD_SIZE):
+                for x in range(BOARD_SIZE):
+                    p = self.board[y][x]
+                    if p and p["owner"] == owner:
+                        for ty in range(BOARD_SIZE):
+                            for tx in range(BOARD_SIZE):
+                                target = self.board[ty][tx]
+                                if target and target["owner"] != owner:
+                                    if self.is_pseudo_valid_move((x, y), (tx, ty), p, owner):
+                                        can_pm = self.can_promote(y, ty, owner, p["name"])
+                                        if self.simulate_move_check("move", (x, y), (tx, ty), owner, promote=False):
+                                            captures.append({"type": "move", "from": (x, y), "to": (tx, ty), "promote": False})
+                                        if can_pm:
+                                            if self.simulate_move_check("move", (x, y), (tx, ty), owner, promote=True):
+                                                captures.append({"type": "move", "from": (x, y), "to": (tx, ty), "promote": True})
+
+            captures = self._order_moves(captures, owner)
+            for move in captures:
+                undo = self._apply_move(move, owner)
+                eval_score = self._quiescence_search(alpha, beta, True, depth - 1)
+                self._undo_move(undo)
+
+                if eval_score <= alpha:
+                    return alpha
+                if eval_score < beta:
+                    beta = eval_score
+            return beta
+
+    def _is_time_up(self):
+        """制限時間チェック（100ノードごとに判定して負荷を軽減）"""
+        if self._nodes_searched % 100 == 0:
+            if time.time() - self._search_start_time >= self._search_time_limit:
+                self._search_aborted = True
+                return True
+        return self._search_aborted
+
+    def minimax(self, game_state, depth, alpha, beta, maximizing):
+        """強化版minimax: undo/redo方式 + 手の順序付け + 静止探索 + 王手延長 + 時間制限"""
+        self._nodes_searched += 1
+
+        # 時間切れチェック
+        if self._is_time_up():
+            return game_state.evaluate_board(), None
+
+        current_turn = GOTE if maximizing else SENTE
+        legal_moves = game_state.get_legal_moves(current_turn)
+
+        # 合法手なし = 詰み
+        if not legal_moves:
+            return (-99999 + (CPU_DEPTH - depth) if maximizing else 99999 - (CPU_DEPTH - depth)), None
+
+        # 深度0: 王手延長 or 静止探索
+        if depth <= 0:
+            is_in_check = game_state.is_king_in_check(current_turn)
+            if is_in_check and depth == 0:
+                depth = 1  # 王手延長: 1手だけ追加探索
+            else:
+                # 静止探索で駒取りの交換を正確に評価
+                return game_state._quiescence_search(alpha, beta, maximizing, QUIESCENCE_DEPTH), None
+
+        # 手の順序付け（alpha-beta枝刈りの効率化）
+        ordered_moves = game_state._order_moves(legal_moves, current_turn)
+
+        best_move = None
+        if maximizing:
+            max_eval = -float('inf')
+            for move in ordered_moves:
+                undo = game_state._apply_move(move, GOTE)
+                eval_score, _ = self.minimax(game_state, depth - 1, alpha, beta, False)
+                game_state._undo_move(undo)
+
+                if self._search_aborted:
+                    if best_move is None:
+                        best_move = move
+                    return max_eval if max_eval > -float('inf') else eval_score, best_move
+
                 if eval_score > max_eval:
                     max_eval = eval_score
                     best_move = move
                 alpha = max(alpha, eval_score)
-                if beta <= alpha: break
+                if beta <= alpha:
+                    break
             return max_eval, best_move
         else:
             min_eval = float('inf')
-            for move in legal_moves:
-                next_state = copy.deepcopy(game_state)
-                if move["type"] == "move":
-                    next_state.make_move("move", move["from"], move["to"], SENTE, move["promote"])
-                else:
-                    next_state.make_move("drop", move["name"], move["to"], SENTE)
-                next_state.switch_turn()
-                eval_score, _ = self.minimax(next_state, depth - 1, alpha, beta, True)
+            for move in ordered_moves:
+                undo = game_state._apply_move(move, SENTE)
+                eval_score, _ = self.minimax(game_state, depth - 1, alpha, beta, True)
+                game_state._undo_move(undo)
+
+                if self._search_aborted:
+                    if best_move is None:
+                        best_move = move
+                    return min_eval if min_eval < float('inf') else eval_score, best_move
+
                 if eval_score < min_eval:
                     min_eval = eval_score
                     best_move = move
                 beta = min(beta, eval_score)
-                if beta <= alpha: break
+                if beta <= alpha:
+                    break
             return min_eval, best_move
+
+    def iterative_deepening(self, maximizing, time_limit=None):
+        """反復深化: 制限時間内で可能な限り深く探索する"""
+        if time_limit is not None:
+            self._search_time_limit = time_limit
+        else:
+            self._search_time_limit = CPU_TIME_LIMIT
+        self._search_start_time = time.time()
+        self._search_aborted = False
+
+        best_move = None
+        best_val = 0
+        reached_depth = 0
+
+        for depth in range(1, CPU_DEPTH + 1):
+            self._nodes_searched = 0
+            self._search_aborted = False
+
+            val, move = self.minimax(self, depth, -float('inf'), float('inf'), maximizing)
+
+            if self._search_aborted:
+                # 時間切れ: このdepthは不完全なので前回の結果を使う
+                elapsed = time.time() - self._search_start_time
+                print(f"  Depth {depth}: TIME UP ({elapsed:.1f}s, {self._nodes_searched} nodes) - using depth {reached_depth} result")
+                break
+
+            # このdepthの探索が完了
+            best_val = val
+            best_move = move
+            reached_depth = depth
+            elapsed = time.time() - self._search_start_time
+            print(f"  Depth {depth}: val={val}, move={move}, time={elapsed:.1f}s, nodes={self._nodes_searched}")
+
+            # 詰みを見つけたら即終了
+            if abs(val) > 90000:
+                print(f"  Mate found at depth {depth}!")
+                break
+
+            # 残り時間が足りなさそうなら次のdepthに行かない
+            # （次のdepthは今回の~10倍かかると推定）
+            remaining = self._search_time_limit - elapsed
+            if remaining < elapsed * 5:
+                print(f"  Stopping: not enough time for depth {depth + 1} (remaining={remaining:.1f}s)")
+                break
+
+        print(f"  Final: depth={reached_depth}, val={best_val}, total_time={time.time()-self._search_start_time:.1f}s")
+        return best_val, best_move
