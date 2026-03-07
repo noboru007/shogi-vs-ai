@@ -2,6 +2,41 @@ const BOARD_SIZE = 9;
 const SENTE = 1;
 const GOTE = -1;
 
+// Single source of truth for AI model options
+const MODEL_OPTIONS = [
+    { value: "gemini-3.1-pro-preview-high", label: "Gemini 3.1 Pro Preview High" },
+    { value: "gemini-3.1-pro-preview-medium", label: "Gemini 3.1 Pro Preview Medium" },
+    { value: "gemini-3-pro-preview-high", label: "Gemini 3 Pro Preview High" },
+    { value: "gemini-3-flash-preview", label: "Gemini 3 Flash Preview" },
+    { value: "gemini-3-flash-preview-high", label: "Gemini 3 Flash Preview High" },
+    { value: "gpt-5.4", label: "GPT-5.4" },
+    { value: "gpt-5.4-high", label: "GPT-5.4 (High Reasoning)" },
+    { value: "gpt-5.3-codex", label: "GPT-5.3 Codex" },
+    { value: "gpt-5.3-codex-high", label: "GPT-5.3 Codex (High Reasoning)" },
+    { value: "gpt-5.2", label: "GPT-5.2" },
+    { value: "gpt-5.2-high", label: "GPT-5.2 (High Reasoning)" },
+    { value: "claude-opus-4-6", label: "Claude Opus 4.6" },
+    { value: "claude-opus-4-6-high", label: "Claude Opus 4.6 (Adaptive)" },
+    { value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
+    { value: "claude-sonnet-4-6-high", label: "Claude Sonnet 4.6 (Adaptive)" },
+    { value: "human", label: "人間" },
+    { value: "cpu", label: "3手先まで読むCPU" }
+];
+
+// Populate a <select> element with MODEL_OPTIONS
+function populateModelSelect(selectId, defaultValue) {
+    const sel = document.getElementById(selectId);
+    if (!sel) return;
+    sel.innerHTML = "";
+    MODEL_OPTIONS.forEach(opt => {
+        const o = document.createElement("option");
+        o.value = opt.value;
+        o.textContent = opt.label;
+        if (opt.value === defaultValue) o.selected = true;
+        sel.appendChild(o);
+    });
+}
+
 console.log("SCRIPT LOADED vdebug3");
 
 // Helper to log moves
@@ -61,8 +96,27 @@ let gMaxRetries = 2;
 let gInstructionType = "medium";
 let gTtsEnabled = false;
 let gTtsSaveFile = false;
+let gVideoMode = false;
 let gMatchPrefix = ""; // yyyymmdd_hhmmss_Sente_vs_Gote
+let gMatchMoves = []; // Metadata for each move (video mode)
 let currentMatchId = null; // To prevent stale AI responses from overwriting new game
+
+// Save AI settings to localStorage for refresh recovery
+function saveAiSettings() {
+    const settings = {
+        currentMatchId: currentMatchId,
+        senteModel: gSenteModel,
+        goteModel: gGoteModel,
+        maxRetries: gMaxRetries,
+        instructionType: gInstructionType,
+        ttsEnabled: gTtsEnabled,
+        ttsSaveFile: gTtsSaveFile,
+        videoMode: gVideoMode,
+        matchPrefix: gMatchPrefix,
+        matchMoves: gMatchMoves
+    };
+    localStorage.setItem('shogi_ai_settings', JSON.stringify(settings));
+}
 
 // Session Management (Local Only)
 function getSessionId() {
@@ -241,6 +295,7 @@ async function startGame(vsCpu) {
         selected = null;
         pendingMove = null;
         currentMatchId = Date.now().toString(); // New Match ID
+        saveAiSettings();
 
         // Clear Game Over Modal
         const goModal = document.getElementById('game-over-modal');
@@ -726,30 +781,58 @@ async function downloadMatchAudio() {
     }
 
     try {
-        const files = await getTtsFilesForMatch(currentMatchId);
+        const audioFiles = await getTtsFilesForMatch(currentMatchId);
+        const screenshots = gVideoMode ? await getScreenshotsForMatch(currentMatchId) : [];
 
-        if (!files || files.length === 0) {
-            showMessage('保存された音声ファイルがありません');
+        if ((!audioFiles || audioFiles.length === 0) && (!screenshots || screenshots.length === 0)) {
+            showMessage('保存されたファイルがありません');
             return;
         }
 
-        // Sort by moveCount
-        files.sort((a, b) => a.moveCount - b.moveCount);
-
-        // Create ZIP
         const zip = new JSZip();
+        const rootFolder = gMatchPrefix || currentMatchId;
 
-        for (const file of files) {
-            // Convert base64 to binary
-            const binaryString = atob(file.audioData);
-            const bytes = new Uint8Array(binaryString.length);
-            for (let i = 0; i < binaryString.length; i++) {
-                bytes[i] = binaryString.charCodeAt(i);
+        // Audio files → rootFolder/audio/
+        if (audioFiles && audioFiles.length > 0) {
+            audioFiles.sort((a, b) => a.moveCount - b.moveCount);
+            const audioDir = gVideoMode ? `${rootFolder}/audio` : rootFolder;
+
+            for (const file of audioFiles) {
+                const binaryString = atob(file.audioData);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                    bytes[i] = binaryString.charCodeAt(i);
+                }
+                const wavData = createWavFile(bytes);
+                zip.file(`${audioDir}/${file.filename}`, wavData);
             }
+        }
 
-            // Create WAV file
-            const wavData = createWavFile(bytes);
-            zip.file(file.filename, wavData);
+        // Screenshots → rootFolder/images/ (video mode only)
+        if (gVideoMode && screenshots && screenshots.length > 0) {
+            screenshots.sort((a, b) => a.moveCount - b.moveCount);
+            for (const ss of screenshots) {
+                const binaryString = atob(ss.imageData);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                    bytes[i] = binaryString.charCodeAt(i);
+                }
+                zip.file(`${rootFolder}/images/${ss.filename}`, bytes);
+            }
+        }
+
+        // metadata.json (video mode only)
+        if (gVideoMode && gMatchMoves.length > 0) {
+            const metadata = {
+                match_id: rootFolder,
+                sente_model: gSenteModel,
+                gote_model: gGoteModel,
+                instruction_level: gInstructionType,
+                total_moves: gMatchMoves.length,
+                moves: gMatchMoves,
+                result: gameState && gameState.game_over ? (gameState.turn === SENTE ? 'gote_win' : 'sente_win') : 'ongoing'
+            };
+            zip.file(`${rootFolder}/metadata.json`, JSON.stringify(metadata, null, 2));
         }
 
         // Generate ZIP and download
@@ -757,16 +840,18 @@ async function downloadMatchAudio() {
         const url = URL.createObjectURL(zipBlob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `${gMatchPrefix}_audio.zip`;
+        a.download = `${rootFolder}.zip`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
 
-        console.log(`Downloaded ${files.length} audio files as ZIP`);
+        const totalFiles = (audioFiles ? audioFiles.length : 0) + (screenshots ? screenshots.length : 0);
+        console.log(`Downloaded ${totalFiles} files as ZIP`);
 
-        // Clear IndexedDB after download
+        // Clear IndexedDB
         await clearTtsForMatch(currentMatchId);
+        if (gVideoMode) await clearScreenshotsForMatch(currentMatchId);
 
         // Hide download button
         const btn = document.getElementById('download-audio-btn');
@@ -920,6 +1005,142 @@ function initTtsUI() {
             }
         });
     }
+
+    // Video mode: auto-enable TTS + save when checked
+    const videoCheckbox = document.getElementById('video-mode');
+    if (videoCheckbox) {
+        videoCheckbox.addEventListener('change', () => {
+            if (videoCheckbox.checked) {
+                if (ttsCheckbox) ttsCheckbox.checked = true;
+                const ttsSave = document.getElementById('tts-save-file');
+                if (ttsSave) ttsSave.checked = true;
+                if (saveOption) saveOption.style.display = 'block';
+            }
+        });
+    }
+}
+
+// Update model name labels on the board
+function updateModelLabels(senteModel, goteModel) {
+    const senteLabel = document.getElementById('sente-model-label');
+    const goteLabel = document.getElementById('gote-model-label');
+    // Find display label from MODEL_OPTIONS
+    const findLabel = (val) => {
+        const opt = MODEL_OPTIONS.find(o => o.value === val);
+        return opt ? opt.label : val;
+    };
+    if (senteLabel) senteLabel.textContent = senteModel ? findLabel(senteModel) : '';
+    if (goteLabel) goteLabel.textContent = goteModel ? findLabel(goteModel) : '';
+}
+
+// ========== Screenshot (Video Mode) ==========
+let screenshotDB = null;
+
+async function initScreenshotDB() {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open('ShogiScreenshots', 1);
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => { screenshotDB = request.result; resolve(screenshotDB); };
+        request.onupgradeneeded = (event) => {
+            const db = event.target.result;
+            if (!db.objectStoreNames.contains('screenshots')) {
+                const store = db.createObjectStore('screenshots', { keyPath: 'id' });
+                store.createIndex('matchId', 'matchId', { unique: false });
+            }
+        };
+    });
+}
+
+async function captureBoard(matchId, moveCount, moveJa) {
+    try {
+        const gameArea = document.querySelector('.game-area');
+        if (!gameArea) return null;
+
+        const canvas = await html2canvas(gameArea, {
+            backgroundColor: '#f5f5dc',
+            scale: 2,
+            useCORS: true
+        });
+
+        const dataUrl = canvas.toDataURL('image/png');
+        const base64 = dataUrl.split(',')[1];
+
+        // Save to IndexedDB
+        if (!screenshotDB) await initScreenshotDB();
+        const paddedCount = String(moveCount).padStart(3, '0');
+        const cleanMove = (moveJa || '').replace(/[\/\\:*?"<>|]/g, '');
+        const filename = `${paddedCount}_${cleanMove}.png`;
+
+        await new Promise((resolve, reject) => {
+            const tx = screenshotDB.transaction(['screenshots'], 'readwrite');
+            const store = tx.objectStore('screenshots');
+            store.put({
+                id: `${matchId}_${paddedCount}`,
+                matchId: matchId,
+                moveCount: moveCount,
+                filename: filename,
+                imageData: base64,
+                timestamp: Date.now()
+            });
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+
+        console.log(`Screenshot saved: ${filename}`);
+        return filename;
+    } catch (e) {
+        console.error('Screenshot capture error:', e);
+        return null;
+    }
+}
+
+async function getScreenshotsForMatch(matchId) {
+    if (!screenshotDB) await initScreenshotDB();
+    return new Promise((resolve, reject) => {
+        const tx = screenshotDB.transaction(['screenshots'], 'readonly');
+        const index = tx.objectStore('screenshots').index('matchId');
+        const req = index.getAll(matchId);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+    });
+}
+
+async function clearScreenshotsForMatch(matchId) {
+    if (!screenshotDB) await initScreenshotDB();
+    return new Promise((resolve, reject) => {
+        const tx = screenshotDB.transaction(['screenshots'], 'readwrite');
+        const store = tx.objectStore('screenshots');
+        const index = store.index('matchId');
+        const req = index.openCursor(IDBKeyRange.only(matchId));
+        req.onsuccess = (event) => {
+            const cursor = event.target.result;
+            if (cursor) { cursor.delete(); cursor.continue(); }
+            else resolve();
+        };
+        req.onerror = () => reject(req.error);
+    });
+}
+
+// Stop AI Match
+function stopAiMatch() {
+    console.log("DEBUG: Stopping AI match, matchId:", currentMatchId);
+
+    // Stop the loop by disabling ai_vs_ai mode (don't change currentMatchId — it's the IndexedDB key)
+    if (gameState) {
+        gameState.ai_vs_ai_mode = false;
+        gameState.game_over = true;
+    }
+
+    // Hide stop button
+    const stopBtn = document.getElementById('stop-match-btn');
+    if (stopBtn) stopBtn.style.display = 'none';
+
+    // Clear thinking indicators
+    setThinking(SENTE, false);
+    setThinking(GOTE, false);
+
+    showMessage('対局を中止しました。📥素材DLボタンからデータをダウンロードできます。');
+    console.log("DEBUG: Match stopped. matchId preserved:", currentMatchId);
 }
 
 // AI vs AI Loop
@@ -944,6 +1165,11 @@ async function startAiVsAiMatch(isResume = false) {
     gTtsEnabled = ttsCheckbox ? ttsCheckbox.checked : false;
     gTtsSaveFile = ttsSaveCheckbox ? ttsSaveCheckbox.checked : false;
 
+    // Video Mode
+    const videoCheckbox = document.getElementById('video-mode');
+    gVideoMode = videoCheckbox ? videoCheckbox.checked : false;
+    gMatchMoves = []; // Reset metadata
+
     // Generate Match Prefix: yyyymmdd_hhmmss_Sente_vs_Gote
     const now = new Date();
     const dateStr = now.getFullYear().toString() +
@@ -954,9 +1180,17 @@ async function startAiVsAiMatch(isResume = false) {
         String(now.getSeconds()).padStart(2, '0');
     const cleanS = sModel.replace(/[^a-zA-Z0-9.\-_]/g, '');
     const cleanG = gModel.replace(/[^a-zA-Z0-9.\-_]/g, '');
-    gMatchPrefix = `${dateStr}_${cleanS}_vs_${cleanG}`;
+    gMatchPrefix = `${dateStr}_${cleanS}_vs_${cleanG} `;
+    saveAiSettings();
 
-    console.log("DEBUG: TTS Enabled:", gTtsEnabled, "Save File:", gTtsSaveFile, "Prefix:", gMatchPrefix);
+    // Update model name labels
+    updateModelLabels(sModel, gModel);
+
+    // Show video download button if video mode is on
+    const videoDlBtn = document.getElementById('video-download-btn');
+    if (videoDlBtn) videoDlBtn.style.display = gVideoMode ? 'inline-block' : 'none';
+
+    console.log("DEBUG: TTS:", gTtsEnabled, "Video:", gVideoMode, "Prefix:", gMatchPrefix);
 
     // SFEN Resume Logic
     let sfen = null;
@@ -975,6 +1209,9 @@ async function startAiVsAiMatch(isResume = false) {
     // Check if Human vs Human (Legacy Mode)
     if (sModel === 'human' && gModel === 'human') {
         console.log("DEBUG: Human vs Human detected.");
+        currentMatchId = Date.now().toString(); // Invalidate any pending AI calls
+        const stopBtn = document.getElementById('stop-match-btn');
+        if (stopBtn) stopBtn.style.display = 'none';
         try {
             const response = await apiCall('/api/reset', 'POST', {
                 vs_ai: false,
@@ -1017,6 +1254,11 @@ async function startAiVsAiMatch(isResume = false) {
         selected = null;
         pendingMove = null;
         currentMatchId = Date.now().toString(); // New Match ID
+        saveAiSettings();
+
+        // Show stop button
+        const stopBtn = document.getElementById('stop-match-btn');
+        if (stopBtn) stopBtn.style.display = 'inline-block';
 
         // Clear Game Over Modal
         const goModal = document.getElementById('game-over-modal');
@@ -1120,13 +1362,39 @@ async function processAiVsAi(matchId) {
             // TTS Playback and Save
             if (result.tts_audio) {
                 playTtsAudio(result.tts_audio);
-                if (gTtsSaveFile && result.move_str_ja) {
+
+                if (gVideoMode && result.move_str_ja) {
+                    // Video mode: save to IndexedDB for ZIP download (skip individual download)
+                    const paddedCount = String(result.move_count).padStart(3, '0');
+                    const cleanMove = (result.move_str_ja || '').replace(/[\/\\:*?"<>|]/g, '');
+                    const filename = `${paddedCount}_${cleanMove}.wav`;
+                    await saveTtsToIndexedDB(currentMatchId, result.move_count, filename, result.tts_audio);
+                } else if (gTtsSaveFile && result.move_str_ja) {
+                    // Normal mode: individual file download
                     saveTtsAudioFile(result.tts_audio, result.move_count, result.move_str_ja);
                 }
             } else if (result.tts_error) {
                 console.error("TTS ERROR:", result.tts_error);
             } else if (gTtsEnabled) {
                 console.warn("TTS: No audio in response (TTS may have failed silently)");
+            }
+
+            // Video Mode: capture screenshot + accumulate metadata
+            if (gVideoMode && result.move_str_ja) {
+                const imgFile = await captureBoard(currentMatchId, result.move_count, result.move_str_ja);
+                const paddedCount = String(result.move_count).padStart(3, '0');
+                const cleanMove = (result.move_str_ja || '').replace(/[\/\\:*?"<>|]/g, '');
+                gMatchMoves.push({
+                    number: result.move_count,
+                    turn: gameState.turn === SENTE ? 'gote' : 'sente', // After move, turn flipped
+                    model: result.model || 'AI',
+                    usi: result.usi || '',
+                    move_ja: result.move_str_ja,
+                    reasoning: result.reasoning || '',
+                    image: imgFile ? `images / ${imgFile} ` : null,
+                    audio: `audio / ${paddedCount}_${cleanMove}.wav`
+                });
+                saveAiSettings(); // Persist metadata to localStorage
             }
 
             // Loop continue
@@ -1147,8 +1415,53 @@ async function processAiVsAi(matchId) {
 
 // Initialization
 window.onload = async () => {
+    // Populate model <select> elements from single source of truth
+    populateModelSelect("sente-model", "human");
+    populateModelSelect("gote-model", "human");
+
     const loaded = loadLocalState();
     initTtsUI();
+
+    // Restore AI settings from localStorage
+    const savedSettings = localStorage.getItem('shogi_ai_settings');
+    if (savedSettings) {
+        try {
+            const settings = JSON.parse(savedSettings);
+            if (settings.currentMatchId) currentMatchId = settings.currentMatchId;
+            if (settings.senteModel) gSenteModel = settings.senteModel;
+            if (settings.goteModel) gGoteModel = settings.goteModel;
+            if (settings.maxRetries) gMaxRetries = settings.maxRetries;
+            if (settings.instructionType) gInstructionType = settings.instructionType;
+            if (settings.ttsEnabled !== undefined) gTtsEnabled = settings.ttsEnabled;
+            if (settings.ttsSaveFile !== undefined) gTtsSaveFile = settings.ttsSaveFile;
+            if (settings.videoMode !== undefined) gVideoMode = settings.videoMode;
+            if (settings.matchPrefix) gMatchPrefix = settings.matchPrefix;
+            if (settings.matchMoves) gMatchMoves = settings.matchMoves;
+            console.log("DEBUG: Restored AI settings from localStorage", settings);
+
+            // Restore model labels
+            if (gSenteModel || gGoteModel) {
+                updateModelLabels(gSenteModel, gGoteModel);
+            }
+        } catch (e) {
+            console.error("AI settings restore error:", e);
+        }
+    }
+
+    // Re-trigger AI turn after refresh
+    if (loaded && gameState && !gameState.game_over) {
+        if (gameState.ai_vs_ai_mode) {
+            // AI vs AI mode: resume the AI loop
+            if (!currentMatchId) currentMatchId = Date.now().toString();
+            console.log("DEBUG: Resuming AI vs AI loop after refresh, matchId:", currentMatchId);
+            setTimeout(() => processAiVsAi(currentMatchId), 1000);
+        } else if (gameState.vs_ai && gameState.turn === GOTE) {
+            // Human vs AI mode, AI's turn: trigger CPU move
+            if (!currentMatchId) currentMatchId = Date.now().toString();
+            console.log("DEBUG: Resuming CPU move after refresh");
+            setTimeout(cpuMove, 500);
+        }
+    }
 
     // 初回アクセス時は初期盤面を生成
     if (!loaded) {

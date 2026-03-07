@@ -11,14 +11,16 @@
     <meta name="theme-color" content="#8b4513">
     <link rel="apple-touch-icon" href="icon.png">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 </head>
 
 <body>
     <div class="container">
         <div class="game-area">
             <div id="gote-hand" class="hand-area">
-                <div class="hand-label">[後手持駒] <span id="gote-thinking" class="thinking-label"
-                        style="display:none;">(考え中...)</span></div>
+                <div class="hand-label">[後手持駒] <span id="gote-model-label" class="model-name-label"></span>
+                    <span id="gote-thinking" class="thinking-label" style="display:none;">(考え中...)</span>
+                </div>
                 <div class="hand-pieces" id="gote-hand-pieces"></div>
             </div>
 
@@ -27,8 +29,9 @@
             </div>
 
             <div id="sente-hand" class="hand-area">
-                <div class="hand-label">[先手持駒] <span id="sente-thinking" class="thinking-label"
-                        style="display:none;">(考え中...)</span></div>
+                <div class="hand-label">[先手持駒] <span id="sente-model-label" class="model-name-label"></span>
+                    <span id="sente-thinking" class="thinking-label" style="display:none;">(考え中...)</span>
+                </div>
                 <div class="hand-pieces" id="sente-hand-pieces"></div>
             </div>
 
@@ -37,36 +40,18 @@
                 <div id="reasoning-area" style="display:none;"></div> <!-- AI Reason Box -->
                 <div id="game-controls">
                     <button onclick="showAiSettings()">対局設定 (Game Settings)</button>
+                    <button id="stop-match-btn" onclick="stopAiMatch()" style="display:none;">⏹ 中止</button>
+                    <button id="video-download-btn" onclick="downloadMatchAudio()" style="display:none;">📥
+                        素材DL</button>
                 </div>
             </div>
 
-            <div id="ai-settings"
-                style="display: none; padding: 10px; background: #fffbe6; border: 1px solid #ccc; margin-bottom: 10px;">
+            <div id="ai-settings" class="ai-settings-panel">
                 <h3>対局設定</h3>
                 <div>
                     <label>先手：</label>
                     <select id="sente-model">
-                        <option value="gemini-3.1-pro-preview-high">Gemini 3.1 Pro Preview High</option>
-                        <option value="gemini-3.1-pro-preview-medium">Gemini 3.1 Pro Preview Medium</option>
-                        <option value="gemini-3-pro-preview-high">Gemini 3 Pro Preview High</option>
-                        <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
-                        <option value="gemini-2.5-pro-high">Gemini 2.5 Pro (Thinking)</option>
-                        <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
-                        <option value="gemini-3-flash-preview-high">Gemini 3 Flash Preview (Thinking)</option>
-                        <!-- <option value="gpt-5.2-pro">GPT-5.2 Pro</option>
-                        <option value="gpt-5.2-pro-high">GPT-5.2 Pro (High Reasoning)</option>
-                        <option value="gpt-5.2-pro-medium">GPT-5.2 Pro (Medium Reasoning)</option> -->
-                        <option value="gpt-5.2">GPT-5.2</option>
-                        <option value="gpt-5.2-high">GPT-5.2 (High Reasoning)</option>
-                        <option value="gpt-5.2-low">GPT-5.2 (Low Reasoning)</option>
-                        <option value="gpt-5.1-codex-max">GPT-5.1 Codex Max</option>
-                        <option value="gpt-5.1-codex-max-high">GPT-5.1 Codex Max (High Reasoning)</option>
-                        <option value="gpt-5.1-codex">GPT-5.1 Codex</option>
-                        <option value="gpt-5.1">GPT-5.1</option>
-                        <option value="gpt-5-pro">GPT-5 Pro</option>
-                        <option value="gpt-5-pro-high">GPT-5 Pro (High Reasoning)</option>
-                        <option value="human" selected>人間</option>
-                        <option value="cpu">3手先まで読むCPU</option>
+                        <!-- Populated by JS MODEL_OPTIONS -->
                     </select>
                 </div>
                 <div>
@@ -81,27 +66,7 @@
                 <div>
                     <label>後手：</label>
                     <select id="gote-model">
-                        <option value="gemini-3.1-pro-preview-high">Gemini 3.1 Pro Preview High</option>
-                        <option value="gemini-3.1-pro-preview-medium">Gemini 3.1 Pro Preview Medium</option>
-                        <option value="gemini-3-pro-preview-high">Gemini 3 Pro Preview High</option>
-                        <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
-                        <option value="gemini-3-flash-preview-high">Gemini 3 Flash Preview (Thinking)</option>
-                        <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
-                        <option value="gemini-2.5-pro-high">Gemini 2.5 Pro (Thinking)</option>
-                        <!-- <option value="gpt-5.2-pro">GPT-5.2 Pro</option>
-                        <option value="gpt-5.2-pro-high">GPT-5.2 Pro (High Reasoning)</option>
-                        <option value="gpt-5.2-pro-medium">GPT-5.2 Pro (Medium Reasoning)</option> -->
-                        <option value="gpt-5.2">GPT-5.2</option>
-                        <option value="gpt-5.2-high">GPT-5.2 (High Reasoning)</option>
-                        <option value="gpt-5.2-low">GPT-5.2 (Low Reasoning)</option>
-                        <option value="gpt-5.1-codex-max">GPT-5.1 Codex Max</option>
-                        <option value="gpt-5.1-codex-max-high">GPT-5.1 Codex Max (High Reasoning)</option>
-                        <option value="gpt-5.1-codex">GPT-5.1 Codex</option>
-                        <option value="gpt-5.1">GPT-5.1</option>
-                        <option value="gpt-5-pro">GPT-5 Pro</option>
-                        <option value="gpt-5-pro-high">GPT-5 Pro (High Reasoning)</option>
-                        <option value="human" selected>人間</option>
-                        <option value="cpu">3手先まで読むCPU</option>
+                        <!-- Populated by JS MODEL_OPTIONS -->
                     </select>
                 </div>
                 <div>
@@ -113,29 +78,34 @@
                     </select>
                 </div>
 
+                <!-- Video Mode -->
+                <div class="video-mode-option">
+                    <label>
+                        <input type="checkbox" id="video-mode"> 📹 動画用データを生成する
+                    </label>
+                </div>
+
                 <!-- TTS (Voice Narration) Settings -->
-                <div style="margin-top: 10px;">
+                <div class="tts-option">
                     <label>
                         <input type="checkbox" id="tts-enabled"> 手番解説を読み上げる
                     </label>
                 </div>
-                <div id="tts-save-option" style="display: none; margin-left: 20px;">
+                <div id="tts-save-option" class="tts-save-option">
                     <label>
                         <input type="checkbox" id="tts-save-file"> 音声ファイルを保存する
                     </label>
                 </div>
 
-                <hr style="margin: 15px 0;">
+                <hr class="settings-divider">
 
                 <!-- Resume Feature -->
-                <div style="margin-bottom: 10px;">
+                <div class="resume-section">
                     <details>
-                        <summary style="cursor: pointer; color: #555;">上級者: SFENから再開</summary>
-                        <div style="margin-top: 5px;">
-                            <input type="text" id="resume-sfen" placeholder="SFEN文字列を入力..."
-                                style="width: 100%; padding: 5px; margin-bottom: 5px;">
-                            <button onclick="startAiVsAiMatch(true)"
-                                style="background: #e0e0e0; color: #333;">SFENから再開</button>
+                        <summary class="resume-summary">上級者: SFENから再開</summary>
+                        <div class="resume-content">
+                            <input type="text" id="resume-sfen" placeholder="SFEN文字列を入力..." class="resume-input">
+                            <button onclick="startAiVsAiMatch(true)" class="btn-resume">SFENから再開</button>
                         </div>
                     </details>
                 </div>
@@ -158,13 +128,11 @@
 
     <!-- Promotion Modal -->
     <div id="promotion-modal" class="modal-overlay">
-        <div class="modal-content" style="text-align: center;">
-            <p style="font-size: 1.2em; font-weight: bold; margin-bottom: 20px;">成りますか？</p>
-            <div style="display: flex; justify-content: center; gap: 20px;">
-                <button onclick="resolvePromotion(true)"
-                    style="padding: 10px 20px; font-size: 1.1em; cursor: pointer;">成る</button>
-                <button onclick="resolvePromotion(false)"
-                    style="padding: 10px 20px; font-size: 1.1em; cursor: pointer;">成らない</button>
+        <div class="modal-content modal-center">
+            <p class="modal-title">成りますか？</p>
+            <div class="modal-actions">
+                <button onclick="resolvePromotion(true)" class="btn-modal">成る</button>
+                <button onclick="resolvePromotion(false)" class="btn-modal">成らない</button>
             </div>
         </div>
     </div>
@@ -172,26 +140,25 @@
     <!-- Game Over Modal -->
     <div id="game-over-modal" class="modal-overlay"
         onclick="document.getElementById('game-over-modal').style.display = 'none'">
-        <div class="modal-content" style="text-align: center;" onclick="event.stopPropagation()">
-            <p style="font-size: 1.5em; font-weight: bold; margin-bottom: 20px;">勝負あり！</p>
-            <p id="game-over-message" style="margin-bottom: 20px;">新しい対局を選んでください</p>
-            <div style="display: flex; justify-content: center; gap: 10px; flex-wrap: wrap;">
-                <button id="download-audio-btn" onclick="downloadMatchAudio()"
-                    style="padding: 10px 20px; font-size: 1.1em; cursor: pointer; display: none;">
+        <div class="modal-content modal-center" onclick="event.stopPropagation()">
+            <p class="modal-title-large">勝負あり！</p>
+            <p id="game-over-message" class="modal-message">新しい対局を選んでください</p>
+            <div class="modal-actions-wrap">
+                <button id="download-audio-btn" onclick="downloadMatchAudio()" class="btn-modal" style="display: none;">
                     音声ファイルをダウンロード
                 </button>
                 <button onclick="document.getElementById('game-over-modal').style.display = 'none'"
-                    style="padding: 10px 20px; font-size: 1.1em; cursor: pointer;">閉じる</button>
+                    class="btn-modal">閉じる</button>
             </div>
         </div>
     </div>
 
     <!-- Generic Message Modal -->
     <div id="message-modal" class="modal-overlay" onclick="closeMessage(event)">
-        <div class="modal-content" style="text-align: center;" onclick="event.stopPropagation()">
+        <div class="modal-content modal-center" onclick="event.stopPropagation()">
             <span class="modal-close-btn" onclick="closeMessage()">×</span>
-            <p id="message-text" style="margin-bottom: 20px; font-size: 1.1em;"></p>
-            <button onclick="closeMessage()" style="padding: 10px 20px; font-size: 1.1em; cursor: pointer;">閉じる</button>
+            <p id="message-text" class="modal-message-text"></p>
+            <button onclick="closeMessage()" class="btn-modal">閉じる</button>
         </div>
     </div>
 

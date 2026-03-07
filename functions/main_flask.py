@@ -1,22 +1,41 @@
 import os
+import re
+import json
+import copy
+import sys
+import logging
+import time
+import traceback
+
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
-from game_logic import ShogiGame, SENTE, GOTE, CPU_DEPTH
-import copy
 import google.generativeai as genai
-import sys
-import logging
-import platform
-import requests # Added for raw API calls
-import time # Added for polling
+import requests
 
-# Custom Logger wrapper to force flush
+from game_logic import ShogiGame, SENTE, GOTE, CPU_DEPTH, SFEN_MAP
+
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
+
+# Configure logger
+logger = logging.getLogger("shogi")
+logger.setLevel(logging.DEBUG)
+if not logger.handlers:
+    _handler = logging.StreamHandler(sys.stdout)
+    _handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+    logger.addHandler(_handler)
+
 def log_info(msg):
-    print(msg, flush=True)
+    logger.info(msg)
+
+def log_debug(msg):
+    logger.debug(msg)
 
 def log_error(msg):
-    print(f"ERROR: {msg}", file=sys.stderr, flush=True)
+    logger.error(msg)
 
 
 load_dotenv()
@@ -37,24 +56,40 @@ DEFAULT_GOTE_MODEL = "gemini-2.5-pro"
 # Each entry: system_prompt for voice style, voice name from Gemini TTS
 TTS_VOICE_CONFIG = {
     "gemini-3.1-pro-preview": {
-        "system_prompt": "将棋の解説をする。18歳の高音の声で、フレンドリーで楽しそうなトーンで。",
+        "system_prompt": "将棋の解説をする。18歳の高音の声で、フレンドリーで楽しそうな、少し早口のトーンで。",
         "voice": "Leda"
     },
     "gemini-3-pro-preview": {
-        "system_prompt": "将棋の解説をする。18歳の高音の声で、フレンドリーで楽しそうなトーンで。",
+        "system_prompt": "将棋の解説をする。18歳の高音の声で、フレンドリーで楽しそうな、少し早口のトーンで。",
         "voice": "Leda"
     },
     "gemini-3-flash-preview": {
-        "system_prompt": "将棋の解説をする。18歳の高音の声で、フレンドリーで楽しそうなトーンで。",
+        "system_prompt": "将棋の解説をする。18歳の高音の声で、フレンドリーで楽しそうな、少し早口のトーンで。",
+        "voice": "Leda"
+    },
+    "gpt-5.4": {
+        "system_prompt": "将棋の解説をする。28歳の、恋人に甘えるピロートークの、少し早口のトーンで。",
+        "voice": "Leda"
+    },
+    "gpt-5.3-codex": {
+        "system_prompt": "将棋の解説をする。28歳の、恋人に甘えるピロートークの、少し早口のトーンで。",
         "voice": "Leda"
     },
     "gpt-5.2": {
-        "system_prompt": "将棋の解説をする。28歳の、恋人に甘えるピロートークのトーンで。",
+        "system_prompt": "将棋の解説をする。28歳の、恋人に甘えるピロートークの、少し早口のトーンで。",
         "voice": "Leda"
     },
     "gpt-5.2-high": {
-        "system_prompt": "将棋の解説をする。28歳の、恋人に甘えるピロートークのトーンで。",
+        "system_prompt": "将棋の解説をする。28歳の、恋人に甘えるピロートークの、少し早口のトーンで。",
         "voice": "Despina"
+    },
+    "claude-opus-4-6": {
+        "system_prompt": "将棋の解説をする。40歳のベテラン棋士のような威厳と温かみのあるが、少し早口なトーンで。",
+        "voice": "Puck"
+    },
+    "claude-sonnet-4-6": {
+        "system_prompt": "将棋の解説をする。22歳の明るく柔らかい語り口で、少し早口なトーンで。",
+        "voice": "Kore"
     },
     "default": {
         "system_prompt": "",
@@ -91,6 +126,7 @@ def generate_tts_audio(text, model_name, turn, is_fallback=False):
     """
     Generate TTS audio using Gemini TTS API.
     Returns base64-encoded audio data or None on error.
+    Retries up to 2 times on 500 errors.
     """
     google_api_key = os.getenv("GOOGLE_API_KEY")
     if not google_api_key:
@@ -126,30 +162,45 @@ def generate_tts_audio(text, model_name, turn, is_fallback=False):
         }
     }
     
-    try:
-        log_info(f"TTS: Generating audio with voice={voice_name}, model={TTS_MODEL}")
-        resp = requests.post(url, headers=headers, json=payload, timeout=60)
-        
-        if resp.status_code != 200:
-            log_error(f"TTS API error: {resp.status_code} {resp.text}")
-            return None
-        
-        resp_json = resp.json()
-        
-        # Extract base64 audio data
-        # Response format: candidates[0].content.parts[0].inlineData.data
+    max_retries = 3
+    for attempt in range(max_retries):
         try:
-            audio_data = resp_json['candidates'][0]['content']['parts'][0]['inlineData']['data']
-            log_info(f"TTS: Successfully generated audio, size={len(audio_data)} chars")
-            return audio_data
-        except (KeyError, IndexError) as e:
-            log_error(f"TTS: Failed to parse response: {e}")
-            log_info(f"TTS: Response keys: {resp_json.keys() if resp_json else 'None'}")
-            return None
+            log_info(f"TTS: Generating audio with voice={voice_name}, model={TTS_MODEL} (attempt {attempt+1}/{max_retries})")
+            resp = requests.post(url, headers=headers, json=payload, timeout=60)
             
-    except Exception as e:
-        log_error(f"TTS: Request failed: {e}")
-        return None
+            if resp.status_code == 500 and attempt < max_retries - 1:
+                log_error(f"TTS API 500 error (attempt {attempt+1}), retrying in 2s...")
+                import time
+                time.sleep(2)
+                continue
+            
+            if resp.status_code != 200:
+                log_error(f"TTS API error: {resp.status_code} {resp.text[:200]}")
+                return None
+            
+            resp_json = resp.json()
+            
+            # Extract base64 audio data
+            try:
+                audio_data = resp_json['candidates'][0]['content']['parts'][0]['inlineData']['data']
+                log_info(f"TTS: Successfully generated audio, size={len(audio_data)} chars")
+                return audio_data
+            except (KeyError, IndexError) as e:
+                log_error(f"TTS: Failed to parse response: {e}")
+                return None
+                
+        except requests.exceptions.Timeout:
+            log_error(f"TTS: Request timeout (attempt {attempt+1})")
+            if attempt < max_retries - 1:
+                import time
+                time.sleep(2)
+                continue
+            return None
+        except Exception as e:
+            log_error(f"TTS: Request failed: {e}")
+            return None
+    
+    return None
 
 # Helper to reconstruct game from SFEN part of request
 def game_from_request(data):
@@ -228,7 +279,6 @@ def parse_usi_string(usi):
     # Drop: P*5e
     if '*' in usi:
         name_char, pos_str = usi.split('*')
-        from game_logic import SFEN_MAP
         CHAR_TO_KANJI = {v: k for k, v in SFEN_MAP.items()}
         name = CHAR_TO_KANJI.get(name_char.upper(), name_char)
         
@@ -458,7 +508,6 @@ def to_usi(move):
     ranks = "abcdefghi"
     
     if move["type"] == "drop":
-        from game_logic import SFEN_MAP
         char = SFEN_MAP.get(move["name"])
         if not char: return None
         if char.startswith("+"): char = char[1:] 
@@ -473,10 +522,483 @@ def to_usi(move):
         return f"{files[sx]}{ranks[sy]}{files[tx]}{ranks[ty]}{promote}"
     return None
 
+
+# ========== LLM Move Helper Functions ==========
+
+def parse_model_name(model_name):
+    """Parse model name to extract base name and reasoning level."""
+    display_name = model_name
+    reasoning_level = None
+    
+    for suffix, level in [("-high", "high"), ("-medium", "medium"), ("-low", "low")]:
+        if model_name.endswith(suffix):
+            model_name = model_name[:-len(suffix)]
+            reasoning_level = level
+            break
+    
+    return model_name, display_name, reasoning_level
+
+
+def build_prompts(game, turn, req_data, legal_moves_usi):
+    """Build system and user prompts based on instruction level."""
+    sfen = game.get_sfen()
+    
+    # Describe pieces in hand for the AI
+    hand_pieces = []
+    current_hand = game.hands[turn]
+    for p, count in current_hand.items():
+        if count > 0:
+            hand_pieces.append(f"{p} x{count}")
+    hand_desc = ", ".join(hand_pieces) if hand_pieces else "None (なし)"
+    
+    turn_str = '先手 (Sente)' if turn == SENTE else '後手 (Gote)'
+    
+    if turn == SENTE:
+        piece_guide = "あなた**先手**で駒はSFEN上で大文字(P, L, N, S, G, B, R, K)で表されます。\n        相手の駒は小文字です。\n        あなたは盤面下側(Rank 9)から上方向(Rank 1)に向かって攻めます。"
+    else:
+        piece_guide = "あなた**後手**で駒はSFEN上で小文字(p, l, n, s, g, b, r, k)で表されます。\n        相手の駒は大文字です。\n        あなたは盤面上側(Rank 1)から下方向(Rank 9)に向かって攻めます。"
+
+    guide_json_str = json.dumps(legal_moves_usi)
+    guide_instruction = f"""
+        選択可能な合法手のリスト: {guide_json_str}
+        
+        あなたは必ずこのリストの中から一手を選ばなければなりません。
+        リストにない手は反則負けとなります。
+        """
+    
+    # Prompt components
+    system_prompt_basic = f"""
+        役割：あなたは最強のAI将棋棋士です。ユーザーから受け取ったSFENデータ（局面）の次の一手を打つ番です。
+        タスク：ユーザーから受け取ったSFENデータのみに基づいて局面を推論し、最善の一手を出力してください。
+        """
+    system_prompt_piece_guide = f"""
+        {piece_guide}
+        {guide_instruction}
+        """
+    # Medium: Optimizer版 — 自力列挙を強調
+    system_prompt_rules_medium = f"""
+        ルール（思考プロセス）:
+        1. SFENを正確に解析して、あなたの駒と相手の駒を正確に把握する。
+        2. 外部から合法手リストは与えられない前提で、局面からあなたの全ての合法手を内部で列挙する。
+        ※自玉に王手がかかっている場合、それを回避しない手は違法手として除外すること。
+        3. 列挙した合法手の中から最善の一手を選択する。
+        4. 選択した最善手（Move）と、その回答を以下の回答フォーマットの形式で出力する。
+        ※最終的な回答は回答フォーマットに違反せず、指定されたUSI形式のみを出力すること。挨拶など余計な文章の出力は禁止する。
+
+        制約：
+        1. 回答は必ず日本語出力すること
+        """
+    # Advanced: 合法手リスト付き — 従来版
+    system_prompt_rules_advanced = f"""
+        ルール（思考プロセス）:
+        1. SFENを正確に解析して、あなたの駒と相手の駒を正確に把握する。
+        2. 与えられた合法手リストの中から最善の一手を選択する。
+        ※自玉に王手がかかっている場合、それを回避しない手は違法手として除外すること。
+        3. 選択した最善手（Move）と、その回答を以下の回答フォーマットの形式で出力する。
+        ※最終的な回答は回答フォーマットに違反せず、指定されたUSI形式のみを出力すること。挨拶など余計な文章の出力は禁止する。
+
+        制約：
+        1. 回答は必ず日本語出力すること
+        """
+    system_prompt_format = f"""
+        回答フォーマット:
+        Move: [USI Move]（例：7g7f、G*5h。持ち駒がない場合は打てません）
+        解説: [この一手を選んだ理由を後付けのフレンドリーな**日本語**で3行以内。「2bと」ではなく、「2二と」のように表記してください。]
+        """
+    user_prompt_basic = f"""
+        現在の局面(SFEN): {sfen}
+        """
+    user_prompt_hand = f"""
+        あなたの手番: {turn_str}
+        あなたの持ち駒: {hand_desc}
+        """
+
+    # Instruction level mapping
+    ui_instruction_type = req_data.get('ai_instruction_type', 'medium')
+    
+    if ui_instruction_type == "simple":
+        system_prompt = system_prompt_basic + system_prompt_format
+        user_prompt = user_prompt_basic
+    elif ui_instruction_type == "advanced":
+        system_prompt = system_prompt_basic + system_prompt_piece_guide + system_prompt_rules_advanced + system_prompt_format
+        user_prompt = user_prompt_basic + user_prompt_hand
+    else:  # "medium" (default)
+        system_prompt = system_prompt_basic + system_prompt_rules_medium + system_prompt_format
+        user_prompt = user_prompt_basic
+
+    # Log Prompts at Game Start
+    if game.move_count <= 2:
+        log_info(f"=== SYSTEM PROMPT (Start of Game) ===\n{system_prompt}\n=====================================")
+        log_info(f"=== USER PROMPT (Start of Game) ===\n{user_prompt}\n===================================")
+
+    return system_prompt, user_prompt
+
+
+def call_openai_api(model_name, system_prompt, user_prompt, reasoning_level):
+    """Call OpenAI API (v1/responses or v1/chat/completions). Returns response text."""
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    if not openai_api_key or OpenAI is None:
+        raise Exception("OpenAI API Key not set or openai package not installed")
+    
+    reasoning_params = {}
+    if reasoning_level:
+        reasoning_params = {"effort": reasoning_level}
+    
+    if "gpt-5" in model_name or "codex" in model_name:
+        return _call_openai_responses(model_name, system_prompt, user_prompt, openai_api_key, reasoning_params)
+    else:
+        return _call_openai_chat(model_name, system_prompt, user_prompt, openai_api_key, reasoning_level)
+
+
+def _call_openai_responses(model_name, system_prompt, user_prompt, api_key, reasoning_params):
+    """Call OpenAI v1/responses API with optional polling."""
+    url = "https://api.openai.com/v1/responses"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {
+        "model": model_name,
+        "input": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+    }
+    if reasoning_params:
+        payload["reasoning"] = reasoning_params
+
+    resp = requests.post(url, headers=headers, json=payload, timeout=1200)
+    if resp.status_code != 200:
+        raise Exception(f"OpenAI v1/responses error: {resp.status_code} {resp.text}")
+    
+    resp_json = resp.json()
+    log_debug(f"v1/responses keys: {list(resp_json.keys())}")
+    
+    # Check if async polling is needed
+    should_poll = False
+    if 'id' in resp_json:
+        if 'choices' not in resp_json and 'output' not in resp_json:
+            should_poll = True
+        elif resp_json.get('type') == 'reasoning':
+            should_poll = True
+    
+    if should_poll:
+        resp_json = _poll_openai_response(resp_json['id'], headers)
+
+    return _extract_openai_text(resp_json)
+
+
+def _poll_openai_response(response_id, headers):
+    """Poll OpenAI async response until completion."""
+    poll_url = f"https://api.openai.com/v1/responses/{response_id}"
+    log_debug(f"Async Response ID: {response_id}. Polling...")
+    
+    for i in range(240):  # Poll for up to 20 mins
+        time.sleep(5)
+        poll_resp = requests.get(poll_url, headers=headers, timeout=30)
+        if poll_resp.status_code == 200:
+            poll_data = poll_resp.json()
+            if 'choices' in poll_data or 'output' in poll_data:
+                log_debug(f"Poll success after {i+1} tries.")
+                return poll_data
+            elif poll_data.get('status') == 'failed':
+                raise Exception("Async response processing failed.")
+        else:
+            log_debug(f"Poll failed {poll_resp.status_code}")
+    
+    raise Exception("Async response timed out.")
+
+
+def _extract_openai_text(resp_json):
+    """Extract text from OpenAI response JSON."""
+    if 'choices' in resp_json:
+        return resp_json['choices'][0]['message']['content']
+    elif 'output' in resp_json:
+        out_list = resp_json['output']
+        text = ""
+        if isinstance(out_list, list):
+            for item in out_list:
+                if isinstance(item, dict) and item.get('type') == 'message' and 'content' in item:
+                    content = item['content']
+                    if isinstance(content, str):
+                        return content
+                    elif isinstance(content, list):
+                        for block in content:
+                            if block.get('type') == 'output_text':
+                                text += block.get('text', '')
+                        if text:
+                            return text
+        return str(out_list)
+    return str(resp_json)
+
+
+def _call_openai_chat(model_name, system_prompt, user_prompt, api_key, reasoning_level):
+    """Call OpenAI v1/chat/completions API."""
+    client = OpenAI(api_key=api_key)
+    
+    kwargs = {}
+    if reasoning_level:
+        kwargs["reasoning_effort"] = reasoning_level
+    
+    response = client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        **kwargs
+    )
+    return response.choices[0].message.content
+
+
+def call_gemini_api(model_name, system_prompt, user_prompt, reasoning_level):
+    """Call Gemini API (REST with thinking or SDK). Returns response text."""
+    if reasoning_level:
+        return _call_gemini_rest_with_thinking(model_name, system_prompt, user_prompt, reasoning_level)
+    else:
+        return _call_gemini_sdk(model_name, system_prompt, user_prompt)
+
+
+def _call_gemini_rest_with_thinking(model_name, system_prompt, user_prompt, thinking_level):
+    """Call Gemini REST API with thinking config."""
+    google_api_key = os.getenv("GOOGLE_API_KEY")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={google_api_key}"
+    
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "system_instruction": {"parts": [{"text": system_prompt}]},
+        "contents": [{"parts": [{"text": user_prompt}]}],
+        "generationConfig": {
+            "thinkingConfig": {
+                "includeThoughts": True,
+                "thinkingLevel": thinking_level
+            }
+        }
+    }
+    
+    log_debug(f"Calling Gemini REST API with Thinking (Level: {thinking_level})")
+    resp = requests.post(url, headers=headers, json=payload, timeout=1200)
+    
+    if resp.status_code != 200:
+        raise Exception(f"Gemini REST API error: {resp.status_code} {resp.text}")
+    
+    resp_json = resp.json()
+    try:
+        parts = resp_json['candidates'][0]['content']['parts']
+        text = ""
+        for part in parts:
+            if 'text' in part:
+                text += part['text'] + "\n"
+        return text
+    except Exception as e:
+        log_error(f"DEBUG: Failed to parse Gemini REST response: {e}")
+        return str(resp_json)
+
+
+def _call_gemini_sdk(model_name, system_prompt, user_prompt):
+    """Call Gemini using the Python SDK."""
+    model = genai.GenerativeModel(model_name, system_instruction=system_prompt)
+    chat = model.start_chat(history=[])
+    response = chat.send_message(user_prompt)
+    return response.text
+
+
+def call_claude_api(model_name, system_prompt, user_prompt, reasoning_level):
+    """Call Anthropic Claude Messages API. Returns response text."""
+    anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not anthropic_api_key:
+        raise Exception("ANTHROPIC_API_KEY not set")
+
+    url = "https://api.anthropic.com/v1/messages"
+    headers = {
+        "x-api-key": anthropic_api_key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+
+    # Build request body
+    body = {
+        "model": model_name,
+        "max_tokens": 16000,
+        "system": system_prompt,
+        "messages": [
+            {"role": "user", "content": user_prompt}
+        ],
+    }
+
+    # Adaptive Thinking (official recommended approach for Opus/Sonnet 4.6)
+    # See: https://docs.anthropic.com/en/docs/build-with-claude/adaptive-thinking
+    if reasoning_level:
+        # Map reasoning_level to effort: high/medium/low/max
+        effort = reasoning_level if reasoning_level in ("max", "high", "medium", "low") else "high"
+        body["thinking"] = {"type": "adaptive"}
+        body["output_config"] = {"effort": effort}
+        log_debug(f"Claude Adaptive Thinking: effort={effort}")
+    else:
+        body["temperature"] = 0.2
+
+    log_debug(f"Claude API call: model={model_name}, reasoning={reasoning_level}")
+
+    resp = requests.post(url, headers=headers, json=body, timeout=120)
+    if resp.status_code != 200:
+        log_error(f"Claude API error {resp.status_code}: {resp.text[:300]}")
+        raise Exception(f"Claude API error: {resp.status_code}")
+
+    data = resp.json()
+
+    # Extract text from content blocks (skip thinking blocks)
+    text_parts = []
+    for block in data.get("content", []):
+        if block.get("type") == "text":
+            text_parts.append(block["text"])
+
+    result = "\n".join(text_parts)
+    log_debug(f"Claude response ({len(result)} chars): {result[:200]}")
+    return result
+
+
+def call_llm(model_name, system_prompt, user_prompt, reasoning_level):
+    """Route LLM call to the appropriate provider."""
+    if model_name.startswith("gpt") or model_name.startswith("o"):
+        return call_openai_api(model_name, system_prompt, user_prompt, reasoning_level)
+    elif model_name.startswith("claude"):
+        return call_claude_api(model_name, system_prompt, user_prompt, reasoning_level)
+    else:
+        return call_gemini_api(model_name, system_prompt, user_prompt, reasoning_level)
+
+
+def parse_llm_response(text):
+    """Parse LLM response to extract reasoning and USI move."""
+    reasoning = ""
+    reasoning_match = re.search(
+        r"(?:解説|Reasoning|Explanation)[:：][\s\*]*([\s\S]+?)(?=[\s\*]*Move:|http|$)",
+        text, re.IGNORECASE
+    )
+    if reasoning_match:
+        reasoning = reasoning_match.group(1).strip().strip("* \t\n")
+
+    # Extract USI move candidates
+    candidates = re.findall(r"Move:[\s\*]*([a-zA-Z0-9\+\*]+)", text, re.IGNORECASE)
+    
+    usi_move = None
+    for cand in candidates:
+        cand = cand.strip().strip("'\"`")
+        if re.match(r"^[1-9][a-i][1-9][a-i]\+?$", cand):
+            usi_move = cand
+            break
+        elif re.match(r"^[PLNSGBRK]\*[1-9][a-i]$", cand):
+            usi_move = cand
+            break
+        else:
+            log_debug(f"Skipping invalid candidate: {cand}")
+
+    return usi_move, reasoning
+
+
+def validate_and_execute_move(game, usi_move, turn, legal_moves_usi):
+    """Validate parsed USI move and execute it if legal. Returns (success, parsed_move)."""
+    if not usi_move:
+        return False, None
+    
+    try:
+        parsed_move = parse_usi_string(usi_move)
+    except Exception as e:
+        log_debug(f"Failed to parse USI: {usi_move} with error: {e}")
+        return False, None
+
+    # Check if strictly legal
+    if usi_move in legal_moves_usi:
+        return True, parsed_move
+    
+    # Check if physically possible (pseudo-legal fallback)
+    move_type = parsed_move['type']
+    is_possible = False
+    
+    if move_type == 'move':
+        is_possible = game.is_physically_possible('move', parsed_move['from'], parsed_move['to'], turn, parsed_move['promote'])
+        if is_possible and parsed_move['promote']:
+            sx, sy = parsed_move['from']
+            p = game.board[sy][sx]
+            if p and not game.can_promote(sy, parsed_move['to'][1], turn, p['name']):
+                log_debug(f"Illegal Promotion Detected: {usi_move}")
+                is_possible = False
+    elif move_type == 'drop':
+        is_possible = game.is_physically_possible('drop', parsed_move['name'], parsed_move['to'], turn)
+    
+    if is_possible:
+        log_debug(f"Permitting physically possible but strictly illegal move: {usi_move}")
+        return True, parsed_move
+    
+    log_debug(f"Move is physically impossible: {usi_move}")
+    return False, None
+
+
+def apply_move(game, parsed_move, turn):
+    """Apply a parsed move to the game."""
+    move_type = parsed_move['type']
+    if move_type == 'move':
+        game.make_move('move', parsed_move['from'], parsed_move['to'], turn, parsed_move['promote'])
+    elif move_type == 'drop':
+        game.make_move('drop', parsed_move['name'], parsed_move['to'], turn)
+    game.switch_turn()
+
+
+def check_game_over(game):
+    """Check if the current player has no legal moves (game over)."""
+    if len(game.get_legal_moves(game.turn)) == 0:
+        game.game_over = True
+        return True
+    return False
+
+
+def build_ai_settings(ai_vs_ai_mode, sente_model, gote_model):
+    """Build ai_settings dict for get_full_state."""
+    return {'ai_vs_ai_mode': ai_vs_ai_mode, 'sente_model': sente_model, 'gote_model': gote_model}
+
+
+def cpu_fallback(game, turn, last_error, tts_enabled, model_name, ai_settings):
+    """Execute CPU fallback when LLM fails."""
+    best_move = game.get_random_move()
+    move_str_ja = ""
+    current_move_count = game.move_count
+    reasoning = f"(LLMの応答が不適切なため、CPUが代打ちしました。{last_error})"
+
+    if best_move:
+        move_str_ja = get_japanese_move_str(game, best_move)
+        move_type = best_move['type']
+        start_or_name = best_move['from'] if move_type == 'move' else best_move['name']
+        end = best_move['to']
+        promote = best_move.get('promote', False)
+        game.make_move(move_type, start_or_name, end, turn, promote)
+        game.switch_turn()
+
+    check_game_over(game)
+
+    response_data = {
+        'status': 'ok',
+        'move': best_move,
+        'usi': "CPU_FALLBACK_ERROR",
+        'move_str_ja': move_str_ja,
+        'move_count': current_move_count,
+        'reasoning': reasoning,
+        'model': f"{model_name} (Fallback)",
+        'fallback_used': True,
+        'game_state': get_full_state(game, ai_settings)
+    }
+
+    if tts_enabled and move_str_ja:
+        turn_str = "先手" if turn == SENTE else "後手"
+        tts_text = f"{turn_str}が違法手を選択したため、CPUが代打ちしました。{move_str_ja}。{turn_str}の一手と理由：{last_error}"
+        tts_audio = generate_tts_audio(tts_text, model_name, turn, is_fallback=True)
+        if tts_audio:
+            response_data['tts_audio'] = tts_audio
+
+    return response_data
+
+
+# ========== LLM Move Endpoint ==========
+
 @app.route('/api/llm_move', methods=['POST'])
 def llm_move():
     session_id = request.headers.get('X-Session-ID', 'default_session')
-    log_info(f"DEBUG: llm_move called (Stateless) Session: {session_id}")
+    log_debug(f"llm_move called (Stateless) Session: {session_id}")
     
     if not api_key:
         log_error("ERROR: API Key not configured")
@@ -489,596 +1011,115 @@ def llm_move():
         except Exception as e:
             return jsonify({'status': 'error', 'message': f'Invalid SFEN: {e}'}), 400
 
-        sfen = game.get_sfen()
         turn = game.turn
-        
         ai_vs_ai_mode = req_data.get('ai_vs_ai_mode', False) or req_data.get('ai_vs_ai', False)
         sente_model = req_data.get('sente_model', DEFAULT_SENTE_MODEL)
         gote_model = req_data.get('gote_model', DEFAULT_GOTE_MODEL)
         tts_enabled = req_data.get('tts_enabled', False)
-        
-        sente_model_name = sente_model
-        gote_model_name = gote_model
-        model_name = sente_model_name if turn == SENTE else gote_model_name
-        display_model_name = model_name
-        
-        enable_high_reasoning = False
-        if model_name.endswith("-high"):
-             model_name = model_name[:-5] # Remove "-high"
-             enable_high_reasoning = True
-        
-        enable_medium_reasoning = False
-        if model_name.endswith("-medium"):
-             model_name = model_name[:-7] # Remove "-medium"
-             enable_medium_reasoning = True
-        
-        enable_low_reasoning = False
-        if model_name.endswith("-low"):
-             model_name = model_name[:-4] # Remove "-low"
-             enable_low_reasoning = True
+        ai_settings = build_ai_settings(ai_vs_ai_mode, sente_model, gote_model)
 
-        log_info(f"DEBUG: Stateless Turn: {turn}, Model: {model_name}, HighReasoning: {enable_high_reasoning}, MediumReasoning: {enable_medium_reasoning}, LowReasoning: {enable_low_reasoning}")
+        raw_model_name = sente_model if turn == SENTE else gote_model
+        model_name, display_model_name, reasoning_level = parse_model_name(raw_model_name)
+        
+        log_debug(f"Turn: {turn}, Model: {model_name}, Reasoning: {reasoning_level}")
 
+        # Build legal moves list
         legal_moves = game.get_legal_moves(turn)
-        legal_moves_usi = []
-        for m in legal_moves:
-            u = to_usi(m)
-            if u: legal_moves_usi.append(u)
-            
-        legal_moves_str = ", ".join(legal_moves_usi)
-        
-        # Explicitly describe pieces in hand for the AI to prevent hallucination
-        hand_pieces = []
-        current_hand = game.hands[turn]
-        for p, count in current_hand.items():
-            if count > 0:
-                hand_pieces.append(f"{p} x{count}")
-        hand_desc = ", ".join(hand_pieces) if hand_pieces else "None (なし)"
-        
-        turn_str = '先手 (Sente)' if turn == SENTE else '後手 (Gote)'
-        
-        piece_guide = ""
-        if turn == SENTE:
-            piece_guide = "あなた**先手**で駒はSFEN上で大文字(P, L, N, S, G, B, R, K)で表されます。\n        相手の駒は小文字です。\n        あなたは盤面下側(Rank 9)から上方向(Rank 1)に向かって攻めます。"
-        else:
-            piece_guide = "あなた**後手**で駒はSFEN上で小文字(p, l, n, s, g, b, r, k)で表されます。\n        相手の駒は大文字です。\n        あなたは盤面上側(Rank 1)から下方向(Rank 9)に向かって攻めます。"
+        legal_moves_usi = [u for m in legal_moves if (u := to_usi(m))]
 
-        # === Legal Move Guide Injection ===
-        legal_move_guide = req_data.get('legal_move_guide')
-        guide_json_str = ""
-        guide_instruction = ""
+        # Build prompts
+        system_prompt, user_prompt = build_prompts(game, turn, req_data, legal_moves_usi)
         
-        # Generate JSON list of legal moves
-        # We already have legal_moves_usi list
-        import json
-        guide_json_str = json.dumps(legal_moves_usi)
-
-        guide_instruction = f"""
-        選択可能な合法手のリスト: {guide_json_str}
-        
-        あなたは必ずこのリストの中から一手を選ばなければなりません。
-        リストにない手は反則負けとなります。
-        """
-        
-        # === Construct Prompts ===
-        
-        # System Prompt: Role, Rules, Format
-        system_prompt_basic = f"""
-        役割：あなたは最強のAI将棋棋士です。ユーザーから受け取ったSFENデータ（局面）の次の手を打つ番です。
-        タスク：ユーザーから受け取ったSFENデータに対して、最善の一手を出力してください。
-        """
-        system_prompt_piece_guide = f"""
-        {piece_guide}
-        {guide_instruction}
-        """
-
-        system_prompt_rules = f"""
-        ルール（思考プロセス）:
-        1. SFENを正確に解析して、あなたの駒と相手の駒を正確に把握する。
-        2. 内部で十分に推論を行い、合法手の中から最善手を選択する。
-        ※この際、自玉に王手がかかっている場合、それを回避しない手は違法手として除外すること。
-        3. 選択した最善手（Move）と、その回答を以下の回答フォーマットの形式で出力する。
-        4. 最終的な回答は回答フォーマットに違反せず、指定されたUSI形式のみを出力すること。挨拶など余計な文章の出力は禁止する。
-
-        制約：
-        1. 回答は必ず日本語出力すること
-        """
-        system_prompt_format = f"""
-        回答フォーマット:
-        Move: [USI Move]（例：7g7f、G*5h。持ち駒がない場合は打てません）
-        解説: [この一手を選んだ理由を後付けのフレンドリーな**日本語**で3行以内。「2bと」ではなく、「2二と」のように表記してください。]
-        """
-        # User Prompt: Current State
-        user_prompt_basic = f"""
-        現在の局面(SFEN): {sfen}
-        """
-        user_prompt_hand = f"""
-        あなたの手番: {turn_str}
-        あなたの持ち駒: {hand_desc}
-        """
-
-        # === Instruction Level ===
-        # Simple: シンプルな役割・タスクとSFENから最善手を出力する
-        # Medium: SFENとルールを考慮して最善手を出力する
-        # Advanced: SFENとルールと駒の説明を考慮して最善手を出力する
-        
-        # Map UI value to internal level
-        ui_instruction_type = req_data.get('ai_instruction_type', 'medium')
-        instruction_level = "Medium" # Default
-        
-        if ui_instruction_type == "simple":
-            instruction_level = "Simple"
-        elif ui_instruction_type == "medium":
-            instruction_level = "Medium"
-        elif ui_instruction_type == "advanced":
-            instruction_level = "Advanced"
-
-        log_info(f"DEBUG: UI Instruction Type: {ui_instruction_type} -> Level: {instruction_level}")
-        
-        system_prompt = ""
-        user_prompt = ""
-
-        if instruction_level == "Simple":
-            system_prompt = system_prompt_basic + system_prompt_format
-            user_prompt = user_prompt_basic
-        elif instruction_level == "Medium":
-            system_prompt = system_prompt_basic + system_prompt_rules + system_prompt_format
-            user_prompt = user_prompt_basic
-        elif instruction_level == "Advanced":
-            system_prompt += system_prompt_basic + system_prompt_piece_guide + system_prompt_rules + system_prompt_format
-            user_prompt += user_prompt_basic + user_prompt_hand
-
-        # Log Prompts at Game Start (Move 1 for Sente, Move 2 for Gote)
-        if game.move_count <= 2:
-            log_info(f"=== SYSTEM PROMPT (Start of Game) ===\n{system_prompt}\n=====================================")
-            log_info(f"=== USER PROMPT (Start of Game) ===\n{user_prompt}\n===================================")
-
-        # Configure Gemini
-        import google.generativeai as genai
-        
-        # Configure OpenAI
-        from openai import OpenAI
-        openai_client = None
-        openai_api_key = os.getenv("OPENAI_API_KEY")
-        if openai_api_key:
-            openai_client = OpenAI(api_key=openai_api_key)
-            
-        max_retries_raw = data.get('max_retries', 2)
-        try:
-            max_retries = int(max_retries_raw)
-            if max_retries < 1: max_retries = 1
-            if max_retries > 3: max_retries = 3
-        except:
-            max_retries = 2 
+        # Retry loop
+        max_retries = min(max(int(data.get('max_retries', 2)), 1), 3)
         last_error = ""
 
         for attempt in range(max_retries):
-            # Combined prompt for fallback or non-separated models (though we will use separation where possible)
             current_user_prompt = user_prompt
             if last_error:
-                 current_user_prompt += f"\n\n前回の回答エラー: {last_error}\nもう一度正しい手を選んでください。"
-            
-            log_info(f"DEBUG: Turn: {turn_str}, SFEN: {sfen}")
-            
-            text = ""
+                current_user_prompt += f"\n\n前回の回答エラー: {last_error}\nもう一度正しい手を選んでください。"
+
             try:
-                if model_name.startswith("gpt") or model_name.startswith("o"):
-                    if not openai_client:
-                        raise Exception("OpenAI API Key not set")
-                        
-                    # Init variables to prevent UnboundLocalError
-                    resp = None
-                    response = None
-                    
-                    if "gpt-5" in model_name or "codex" in model_name:
-                        # Special handling for gpt-5-pro (v1/responses)
-                        url = "https://api.openai.com/v1/responses"
-                        headers = {
-                            "Authorization": f"Bearer {openai_api_key}",
-                            "Content-Type": "application/json"
-                        }
-                        payload = {
-                            "model": model_name,
-                            "input": [
-                                {"role": "system", "content": system_prompt},
-                                {"role": "user", "content": current_user_prompt}
-                            ]
-                        }
-                        
-                        if enable_high_reasoning:
-                            payload["reasoning"] = {"effort": "high"}
-                        elif enable_medium_reasoning:
-                            payload["reasoning"] = {"effort": "medium"}
-                        elif enable_low_reasoning:
-                            payload["reasoning"] = {"effort": "low"}
+                text = call_llm(model_name, system_prompt, current_user_prompt, reasoning_level)
+                log_debug(f"Raw LLM Response: {text}")
 
-                        try:
-                            # Add timeout to initial request (1200s for High Reasoning)
-                            resp = requests.post(url, headers=headers, json=payload, timeout=1200)
-                            if resp.status_code != 200:
-                                 raise Exception(f"OpenAI v1/responses error: {resp.status_code} {resp.text}")
-                            
-                            resp_json = resp.json()
-                            log_info(f"DEBUG: Deployment 11 - v1/responses keys: {list(resp_json.keys())}")
-                            
-                            should_poll = False
-                            if 'id' in resp_json:
-                                 if 'choices' not in resp_json and 'output' not in resp_json:
-                                     should_poll = True
-                                 elif resp_json.get('type') == 'reasoning':
-                                     should_poll = True
-                            
-                            if should_poll:
-                                response_id = resp_json['id']
-                                log_info(f"DEBUG: Async Response ID: {response_id}. Polling...")
-                                poll_url = f"https://api.openai.com/v1/responses/{response_id}"
-                                param_headers = headers.copy()
-                                
-                                max_retries_poll = 240 # Poll for up to 20 mins (240*5s)
-                                for i in range(max_retries_poll):
-                                    time.sleep(5)
-                                    # Add timeout to polling request
-                                    poll_resp = requests.get(poll_url, headers=param_headers, timeout=30)
-                                    if poll_resp.status_code == 200:
-                                        poll_data = poll_resp.json()
-                                        if 'choices' in poll_data or 'output' in poll_data:
-                                            resp_json = poll_data
-                                            log_info(f"DEBUG: Poll success after {i+1} tries.")
-                                            break
-                                        elif poll_data.get('status') == 'failed':
-                                            raise Exception("Async response processing failed.")
-                                    else:
-                                        log_info(f"DEBUG: Poll failed {poll_resp.status_code}")
-                                else:
-                                    raise Exception("Async response timed out.")
-                            else:
-                                 log_info(f"DEBUG: Polling Skipped. resp_json={str(resp_json)}")
-
-                            # Parsing logic
-                            if 'choices' in resp_json:
-                                text = resp_json['choices'][0]['message']['content']
-                            elif 'output' in resp_json:
-                                 out_list = resp_json['output']
-                                 text = ""
-                                 found_content = False
-                                 if isinstance(out_list, list):
-                                     for item in out_list:
-                                         if isinstance(item, dict):
-                                             if item.get('type') == 'message' and 'content' in item:
-                                                 stats_content = item['content']
-                                                 if isinstance(stats_content, str):
-                                                     text = stats_content
-                                                     found_content = True
-                                                 elif isinstance(stats_content, list):
-                                                     for block in stats_content:
-                                                         if block.get('type') == 'output_text':
-                                                             text += block.get('text', '')
-                                                             found_content = True
-                                                 if found_content: break
-                                 if not found_content:
-                                     text = str(out_list)
-                            else:
-                                text = str(resp_json)
-                                
-                        except Exception as e:
-                             log_error(f"DEBUG: OpenAI v1/responses Error: {e}")
-                             raise e
-
-                        log_info(f"DEBUG: {model_name} Response len: {len(text)}")
-                    
-                    else:
-                        # Standard v1/chat/completions
-                        try:
-                            response = openai_client.chat.completions.create(
-                                model=model_name,
-                                messages=[
-                                    {"role": "system", "content": system_prompt},
-                                    {"role": "user", "content": current_user_prompt}
-                                ],
-                                **({"reasoning_effort": "high"} if enable_high_reasoning else 
-                                   {"reasoning_effort": "medium"} if enable_medium_reasoning else
-                                   {"reasoning_effort": "low"} if enable_low_reasoning else {})
-                            )
-                            text = response.choices[0].message.content
-                        except Exception as e:
-                            log_error(f"DEBUG: OpenAI Chat Completion Error: {e}")
-                            if 'response' in locals() and response and hasattr(response, 'choices'):
-                                 log_info(f"DEBUG: Partial response info: {response.choices}")
-                            raise e
-
-                        log_info(f"DEBUG: OpenAI Response len: {len(text)}")
-                else:
-                    # Gemini Call
-                    log_info("DEBUG: Configuring Gemini Model...")
-                    
-                    if enable_high_reasoning or enable_medium_reasoning or enable_low_reasoning:
-                        # Use REST API directly to bypass SDK validation issues with 'thinking_config'
-                        # URL: https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={API_KEY}
-                        thinking_level = "high" if enable_high_reasoning else "medium" if enable_medium_reasoning else "low"
-                        google_api_key = os.getenv("GOOGLE_API_KEY")
-                        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={google_api_key}"
-                        
-                        headers = {"Content-Type": "application/json"}
-                        payload = {
-                            "contents": [{
-                                "parts": [{"text": system_prompt + "\n\n" + current_user_prompt}]
-                            }],
-                            "generationConfig": {
-                                "thinkingConfig": {
-                                    "includeThoughts": True,
-                                    "thinkingLevel": thinking_level
-                                }
-                            }
-                        }
-                        
-                        # Note: System instructions are better passed in 'system_instruction' field if creating a new chat,
-                        # but for single turn generateContent, we can prepend or use 'system_instruction' field.
-                        # v1beta supports system_instruction.
-                        payload["system_instruction"] = {
-                            "parts": [{"text": system_prompt}]
-                        }
-                        payload["contents"] = [{
-                            "parts": [{"text": current_user_prompt}]
-                        }]
-
-                        log_info(f"DEBUG: Calling Gemini REST API: {url} with Thinking (Level: {thinking_level})")
-                        # Add timeout for Gemini (1200s for High Reasoning)
-                        resp = requests.post(url, headers=headers, json=payload, timeout=1200)
-                        
-                        if resp.status_code != 200:
-                            raise Exception(f"Gemini REST API error: {resp.status_code} {resp.text}")
-                            
-                        resp_json = resp.json()
-                        # Parse response
-                        # typically: candidates[0].content.parts[0].text
-                        try:
-                            # Handling thoughts: The API might return thoughts in a separate part or mixed.
-                            # Standard text is usually in 'text'.
-                            # If thoughts are present, they are in candidates[0].content.parts 
-                            # Checking structure...
-                            parts = resp_json['candidates'][0]['content']['parts']
-                            text = ""
-                            for part in parts:
-                                if 'text' in part:
-                                    text += part['text'] + "\n"
-                            # log_info(f"DEBUG: Gemini REST Response Parts: {parts}")
-                        except Exception as e:
-                            log_error(f"DEBUG: Failed to parse Gemini REST response: {e}")
-                            text = str(resp_json)
-
-                    else:
-                        # Use SDK for standard calls
-                        model = genai.GenerativeModel(
-                            model_name,
-                            system_instruction=system_prompt
-                        )
-                        chat = model.start_chat(history=[])
-                        
-                        try:
-                            response = chat.send_message(current_user_prompt)
-                            text = response.text
-                        except Exception as e:
-                            # Handle safety blocks or other non-text responses
-                            log_info(f"DEBUG: Gemini Error or Block: {e}")
-                            # Check for parts or safety feedback if available
-                            if 'response' in locals() and hasattr(response, 'candidates') and response.candidates:
-                                log_info(f"DEBUG: Candidate info: {response.candidates[0]}")
-                            raise e # re-raise to trigger fallback
-
-                    log_info(f"DEBUG: Gemini Response len: {len(text)}")
-
-                log_info(f"DEBUG: Raw LLM Response: {text}")
+                usi_move, reasoning = parse_llm_response(text)
                 
-                import re
-                reasoning = ""
-                # Improved regex to handle "解説: ..." or "Reasoning: ..."
-                # Supports both orders, capturing text until "Move:" or end of string.
-                # Uses non-capturing group (?:) for the label.
-                reasoning_match = re.search(r"(?:解説|Reasoning|Explanation)[:：][\s\*]*([\s\S]+?)(?=[\s\*]*Move:|http|$)", text, re.IGNORECASE)
-                if reasoning_match:
-                    reasoning = reasoning_match.group(1).strip()
-                    # Remove leading/trailing asterisks if present
-                    reasoning = reasoning.strip("* \t\n")
-
-                # Proposal 1: Extract ALL candidates and pick the first valid USI
-                # Regex to capture potential move strings after "Move:" (ignoring *, whitespace)
-                # We capture a broader set of characters to catch "Re" or "7g7f" alike, then filter.
-                candidates = re.findall(r"Move:[\s\*]*([a-zA-Z0-9\+\*]+)", text, re.IGNORECASE)
-                
-                usi_move = None
-                parsed_move = None
-                
-                for cand in candidates:
-                    cand = cand.strip().strip("'\"`")
-                    # Validate USI patterns
-                    # Normal: 4 chars (7g7f) or 5 chars (7g7f+)
-                    # Drop: 4 chars (G*5h) or 3 chars (rarely formatted G*5, but USI is G*5h)
-                    # Simple regex for strict USI:
-                    # 1. Move: [1-9][a-i][1-9][a-i](\+)?
-                    # 2. Drop: [PLNSGBRK]\*[1-9][a-i]
-                    
-                    is_valid = False
-                    if re.match(r"^[1-9][a-i][1-9][a-i]\+?$", cand):
-                         is_valid = True
-                    elif re.match(r"^[PLNSGBRK]\*[1-9][a-i]$", cand):
-                         is_valid = True
-                         
-                    if is_valid:
-                        usi_move = cand
-                        log_info(f"DEBUG: Found valid USI move: {usi_move}")
-                        break
-                    else:
-                        log_info(f"DEBUG: Skipping invalid candidate: {cand}")
-
-                move_executed = False
-                if usi_move:
-                    # Parse USI to internal format
-                    try:
-                        parsed_move = parse_usi_string(usi_move)
-                    except Exception as e:
-                        log_info(f"DEBUG: Failed to parse USI: {usi_move} with error: {e}")
-                
-                if parsed_move:
-                    # 1. Check if strictly legal
-                    if usi_move in legal_moves_usi:
-                        move_executed = True
-                    # 2. Check if physically possible (Pseudo-legal)
-                    elif parsed_move:
-                         move_type = parsed_move['type']
-                         is_possible = False
-                         if move_type == 'move':
-                             is_possible = game.is_physically_possible('move', parsed_move['from'], parsed_move['to'], turn, parsed_move['promote'])
-                             
-                             # Critical Fix: Validate Promotion Rules even in fallback
-                             if is_possible and parsed_move['promote']:
-                                 sx, sy = parsed_move['from']
-                                 tx, ty = parsed_move['to']
-                                 # We need piece_name. 'is_physically_possible' implies piece exists at from.
-                                 p = game.board[sy][sx]
-                                 if p and not game.can_promote(sy, ty, turn, p['name']):
-                                     log_info(f"DEBUG: Illegal Promotion Detected: {usi_move}")
-                                     is_possible = False
-
-                         elif move_type == 'drop':
-                             is_possible = game.is_physically_possible('drop', parsed_move['name'], parsed_move['to'], turn)
-                         
-                         if is_possible:
-                             log_info(f"DEBUG: Permitting physically possible but strictly illegal move: {usi_move}")
-                             move_executed = True
-                         else:
-                             log_info(f"DEBUG: Move is physically impossible or Illegal Promotion: {usi_move}")
-                else:
-                    log_info(f"DEBUG: No USI found in response. Full Response: {text}")
-
-                # Execute Move or Fallback
-                move_str_ja = ""
-                current_move_count = game.move_count
-                
-                if move_executed and parsed_move:
-                    move_str_ja = get_japanese_move_str(game, parsed_move)
-                    move_type = parsed_move['type']
-                    if move_type == 'move':
-                        game.make_move('move', parsed_move['from'], parsed_move['to'], turn, parsed_move['promote'])
-                    elif move_type == 'drop':
-                        game.make_move('drop', parsed_move['name'], parsed_move['to'], turn)
-                    
-                    game.switch_turn()
-                    log_info(f"DEBUG: Post-Move SFEN: {game.get_sfen()}")
-
-                    # === Try Rule Check ===
-                    # After switching turn, it is now the opponent's turn.
-                    # We check if the opponent (game.turn) can capture the previous player's King.
-                    # Standard logic: previous player = game.turn * -1
-                    # If game.can_capture_king(game.turn) is True, it means the previous move was illegal (ignored check).
-                    if game.can_capture_king(game.turn):
-                         log_info("DEBUG: King Capture allowed! Previous move was fatal.")
-                         game.game_over = True
-                         winner_name = "Sente" if game.turn == SENTE else "Gote" # Current turn player wins
-                         response_data = {
-                            'status': 'ok',
-                            'move': parsed_move, 
-                            'usi': usi_move,
-                            'move_str_ja': move_str_ja,
-                            'move_count': current_move_count,
-                            'reasoning': reasoning + " (反則負け: 王将を取られる状態です)", 
-                            'model': display_model_name,
-                            'game_over': True,
-                            'winner': winner_name,
-                            'game_state': get_full_state(game, {'ai_vs_ai_mode': ai_vs_ai_mode, 'sente_model': sente_model, 'gote_model': gote_model})
-                        }
-                         return jsonify(response_data)
-                else:
-                    # 3. Invalid Move or No Move -> Retry
-                    log_info("DEBUG: Invalid move or no move found. Retrying...")
+                if not usi_move:
+                    log_debug(f"No USI found in response.")
                     last_error = f"LLMの一手と理由: {usi_move}.  {reasoning}"
                     continue
 
-                winner = None
-                if len(game.get_legal_moves(game.turn)) == 0:
+                log_debug(f"Found valid USI move: {usi_move}")
+                move_executed, parsed_move = validate_and_execute_move(game, usi_move, turn, legal_moves_usi)
+
+                if not move_executed:
+                    log_debug("Invalid move. Retrying...")
+                    last_error = f"LLMの一手と理由: {usi_move}.  {reasoning}"
+                    continue
+
+                # Move is valid — execute
+                move_str_ja = get_japanese_move_str(game, parsed_move)
+                current_move_count = game.move_count
+                apply_move(game, parsed_move, turn)
+                log_debug(f"Post-Move SFEN: {game.get_sfen()}")
+
+                # Check if previous move was fatal (king can be captured)
+                if game.can_capture_king(game.turn):
+                    log_debug("King Capture allowed! Previous move was fatal.")
                     game.game_over = True
+                    winner_name = "Sente" if game.turn == SENTE else "Gote"
+                    return jsonify({
+                        'status': 'ok',
+                        'move': parsed_move, 'usi': usi_move,
+                        'move_str_ja': move_str_ja,
+                        'move_count': current_move_count,
+                        'reasoning': reasoning + " (反則負け: 王将を取られる状態です)",
+                        'model': display_model_name,
+                        'game_over': True, 'winner': winner_name,
+                        'game_state': get_full_state(game, ai_settings)
+                    })
+
+                # Normal success
+                winner = None
+                if check_game_over(game):
                     winner = "Sente" if game.turn == GOTE else "Gote"
-                    log_info(f"DEBUG: Game Over. Winner: {winner}")
-                
+                    log_debug(f"Game Over. Winner: {winner}")
+
                 response_data = {
                     'status': 'ok',
-                    'move': parsed_move, 
-                    'usi': usi_move,
+                    'move': parsed_move, 'usi': usi_move,
                     'move_str_ja': move_str_ja,
                     'move_count': current_move_count,
-                    'reasoning': reasoning, 
+                    'reasoning': reasoning,
                     'model': display_model_name,
-                    'game_state': get_full_state(game, {'ai_vs_ai_mode': ai_vs_ai_mode, 'sente_model': sente_model, 'gote_model': gote_model})
+                    'game_state': get_full_state(game, ai_settings)
                 }
-                
-                # Generate TTS audio if enabled
+
                 if tts_enabled and move_str_ja:
-                    # Content to speak: move + reasoning (excluding SFEN)
                     tts_text = f"{move_str_ja}。{reasoning}" if reasoning else move_str_ja
                     tts_audio = generate_tts_audio(tts_text, model_name, turn, is_fallback=False)
                     if tts_audio:
                         response_data['tts_audio'] = tts_audio
                     else:
                         response_data['tts_error'] = "TTS generation failed (quota exceeded or API error)"
-                
+
                 return jsonify(response_data)
 
             except Exception as e:
                 log_error(f"ERROR inside attempt loop: {e}")
                 last_error = str(e)
-                continue # Retry
+                continue
 
+        # All retries exhausted — CPU fallback
         log_error(f"ERROR: Max retries reached. Last Error: {last_error}. Switching to CPU Fallback.")
-        
-        # CPU Fallback Logic (Duplicate of logic above)
-        best_move = game.get_random_move()
-        move_str_ja = ""
-        current_move_count = game.move_count
-        parsed_move = None
-        usi_move = "CPU_FALLBACK_ERROR"
-        reasoning = f"(LLMの応答が不適切なため、CPUが代打ちしました。{last_error})"
-
-        if best_move:
-             move_str_ja = get_japanese_move_str(game, best_move)
-             move_type = best_move['type']
-             start_or_name = best_move['from'] if move_type == 'move' else best_move['name']
-             end = best_move['to']
-             promote = best_move.get('promote', False)
-             
-             game.make_move(move_type, start_or_name, end, turn, promote)
-             game.switch_turn()
-             parsed_move = best_move
-             
-        if len(game.get_legal_moves(game.turn)) == 0:
-             game.game_over = True
-             
-        response_data = {
-            'status': 'ok',
-            'move': parsed_move, 
-            'usi': usi_move,
-            'move_str_ja': move_str_ja,
-            'move_count': current_move_count,
-            'reasoning': reasoning, 
-            'model': f"{model_name} (Fallback)",
-            'fallback_used': True,
-            'game_state': get_full_state(game, {'ai_vs_ai_mode': ai_vs_ai_mode, 'sente_model': sente_model, 'gote_model': gote_model})
-        }
-        
-        # Generate TTS audio for fallback if enabled
-        if tts_enabled and move_str_ja:
-            turn_str = "先手" if turn == SENTE else "後手"
-            # Special fallback message format
-            tts_text = f"{turn_str}が違法手を選択したため、CPUが代打ちしました。{move_str_ja}。{turn_str}の一手と理由：{last_error}"
-            tts_audio = generate_tts_audio(tts_text, model_name, turn, is_fallback=True)
-            if tts_audio:
-                response_data['tts_audio'] = tts_audio
-        
-        return jsonify(response_data)
+        return jsonify(cpu_fallback(game, turn, last_error, tts_enabled, model_name, ai_settings))
 
     except Exception as e:
         log_error(f"CRITICAL ERROR in llm_move: {e}")
-        import traceback
         traceback.print_exc()
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
 
 @app.route('/api/check_promote', methods=['POST'])
 def check_promote():
