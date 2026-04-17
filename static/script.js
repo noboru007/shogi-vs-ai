@@ -22,6 +22,8 @@ const MODEL_OPTIONS = [
     { value: "gpt-5.3-codex-high", label: "GPT-5.3 Codex (High Reasoning)" },
     { value: "gpt-5.2", label: "GPT-5.2" },
     { value: "gpt-5.2-high", label: "GPT-5.2 (High Reasoning)" },
+    { value: "claude-opus-4-7", label: "Claude Opus 4.7" },
+    { value: "claude-opus-4-7-high", label: "Claude Opus 4.7 (Adaptive)" },
     { value: "claude-opus-4-6", label: "Claude Opus 4.6" },
     { value: "claude-opus-4-6-high", label: "Claude Opus 4.6 (Adaptive)" },
     { value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },

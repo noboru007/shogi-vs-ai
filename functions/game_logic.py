@@ -471,28 +471,76 @@ class ShogiGame:
         zone = [0, 1, 2] if owner == SENTE else [6, 7, 8]
         return sy in zone or ey in zone
 
+    def _piece_destinations(self, x, y, piece, owner):
+        """駒の種類に応じて到達可能マスを直接列挙する。
+        (tx, ty) を yield する。自駒マスは除外し、敵駒マスは含む（そこでスライドは停止）。
+        """
+        piece_info = PIECES[piece["name"]]
+        move_type = piece_info["type"]
+        base_moves = piece_info["moves"]
+        extra_moves = piece_info.get("extra_moves", [])
+        forward = 1 if owner == SENTE else -1
+
+        if move_type in ("step", "jump"):
+            for mx, my in base_moves:
+                tx, ty = x + mx * forward, y + my * forward
+                if not (0 <= tx < BOARD_SIZE and 0 <= ty < BOARD_SIZE):
+                    continue
+                target = self.board[ty][tx]
+                if target and target["owner"] == owner:
+                    continue
+                yield tx, ty
+            return
+
+        # slide: 各方向にブロッカーまで進む
+        for mx, my in base_moves:
+            dx, dy = mx * forward, my * forward
+            tx, ty = x + dx, y + dy
+            while 0 <= tx < BOARD_SIZE and 0 <= ty < BOARD_SIZE:
+                target = self.board[ty][tx]
+                if target and target["owner"] == owner:
+                    break
+                yield tx, ty
+                if target:
+                    break
+                tx += dx
+                ty += dy
+        # 馬/竜の追加一歩
+        for mx, my in extra_moves:
+            tx, ty = x + mx * forward, y + my * forward
+            if not (0 <= tx < BOARD_SIZE and 0 <= ty < BOARD_SIZE):
+                continue
+            target = self.board[ty][tx]
+            if target and target["owner"] == owner:
+                continue
+            yield tx, ty
+
     def get_legal_moves(self, owner):
         moves = []
         for y in range(BOARD_SIZE):
             for x in range(BOARD_SIZE):
                 p = self.board[y][x]
-                if p and p["owner"] == owner:
-                    for ty in range(BOARD_SIZE):
-                        for tx in range(BOARD_SIZE):
-                            if self.is_pseudo_valid_move((x, y), (tx, ty), p, owner):
-                                can_pm = self.can_promote(y, ty, owner, p["name"])
-                                if self.simulate_move_check("move", (x, y), (tx, ty), owner, promote=False):
-                                    moves.append({"type": "move", "from": (x, y), "to": (tx, ty), "promote": False})
-                                if can_pm:
-                                    if self.simulate_move_check("move", (x, y), (tx, ty), owner, promote=True):
-                                        moves.append({"type": "move", "from": (x, y), "to": (tx, ty), "promote": True})
+                if not p or p["owner"] != owner:
+                    continue
+                for tx, ty in self._piece_destinations(x, y, p, owner):
+                    can_pm = self.can_promote(y, ty, owner, p["name"])
+                    if self.simulate_move_check("move", (x, y), (tx, ty), owner, promote=False):
+                        moves.append({"type": "move", "from": (x, y), "to": (tx, ty), "promote": False})
+                    if can_pm and self.simulate_move_check("move", (x, y), (tx, ty), owner, promote=True):
+                        moves.append({"type": "move", "from": (x, y), "to": (tx, ty), "promote": True})
+        # 打つ手: 二歩の筋を事前計算
+        nifu_cols = {x for x in range(BOARD_SIZE) if self.has_nifu(x, owner)}
         for name, count in self.hands[owner].items():
-            if count > 0:
-                for y in range(BOARD_SIZE):
-                    for x in range(BOARD_SIZE):
-                        if self.board[y][x] is None:
-                            if self.simulate_move_check("drop", name, (x, y), owner):
-                                moves.append({"type": "drop", "name": name, "to": (x, y)})
+            if count <= 0:
+                continue
+            for y in range(BOARD_SIZE):
+                for x in range(BOARD_SIZE):
+                    if self.board[y][x] is not None:
+                        continue
+                    if name == "歩" and x in nifu_cols:
+                        continue
+                    if self.simulate_move_check("drop", name, (x, y), owner):
+                        moves.append({"type": "drop", "name": name, "to": (x, y)})
         return moves
 
     def evaluate_board(self):
@@ -936,18 +984,15 @@ class ShogiGame:
                 p = self.board[y][x]
                 if not p or p["owner"] != owner:
                     continue
-                for ty in range(BOARD_SIZE):
-                    for tx in range(BOARD_SIZE):
-                        target = self.board[ty][tx]
-                        if not target or target["owner"] == owner:
-                            continue
-                        if not self.is_pseudo_valid_move((x, y), (tx, ty), p, owner):
-                            continue
-                        if self.simulate_move_check("move", (x, y), (tx, ty), owner, promote=False):
-                            captures.append({"type": "move", "from": (x, y), "to": (tx, ty), "promote": False})
-                        if self.can_promote(y, ty, owner, p["name"]) and \
-                                self.simulate_move_check("move", (x, y), (tx, ty), owner, promote=True):
-                            captures.append({"type": "move", "from": (x, y), "to": (tx, ty), "promote": True})
+                for tx, ty in self._piece_destinations(x, y, p, owner):
+                    target = self.board[ty][tx]
+                    if not target:
+                        continue
+                    if self.simulate_move_check("move", (x, y), (tx, ty), owner, promote=False):
+                        captures.append({"type": "move", "from": (x, y), "to": (tx, ty), "promote": False})
+                    if self.can_promote(y, ty, owner, p["name"]) and \
+                            self.simulate_move_check("move", (x, y), (tx, ty), owner, promote=True):
+                        captures.append({"type": "move", "from": (x, y), "to": (tx, ty), "promote": True})
         return captures
 
     def _quiescence_search(self, alpha, beta, maximizing, depth):

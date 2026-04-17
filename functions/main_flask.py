@@ -72,6 +72,10 @@ TTS_VOICE_CONFIG = {
         "system_prompt": "将棋の解説をする。28歳の、恋人に甘えるピロートークの、少し早口のトーンで。",
         "voice": "Despina"
     },
+    "claude-opus-4-7": {
+        "system_prompt": "将棋の解説をする。40歳のベテラン棋士のような威厳と温かみのあるが、少し早口なトーンで。",
+        "voice": "Puck"
+    },
     "claude-opus-4-6": {
         "system_prompt": "将棋の解説をする。40歳のベテラン棋士のような威厳と温かみのあるが、少し早口なトーンで。",
         "voice": "Puck"
@@ -705,20 +709,24 @@ def call_claude_api(model_name, system_prompt, user_prompt, reasoning_level):
         "content-type": "application/json",
     }
 
-    # Build request body
+    # Adaptive Thinking 時は思考トークンも max_tokens に含まれるため余裕を持たせる
+    max_tokens = 32000 if reasoning_level else 16000
+
+    # システムプロンプトは毎手ほぼ同一なので Prompt Caching を有効化
     body = {
         "model": model_name,
-        "max_tokens": 16000,
-        "system": system_prompt,
+        "max_tokens": max_tokens,
+        "system": [
+            {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}
+        ],
         "messages": [
             {"role": "user", "content": user_prompt}
         ],
     }
 
-    # Adaptive Thinking (official recommended approach for Opus/Sonnet 4.6)
+    # Adaptive Thinking (official recommended approach for Opus/Sonnet 4.6+)
     # See: https://docs.anthropic.com/en/docs/build-with-claude/adaptive-thinking
     if reasoning_level:
-        # Map reasoning_level to effort: high/medium/low/max
         effort = reasoning_level if reasoning_level in ("max", "high", "medium", "low") else "high"
         body["thinking"] = {"type": "adaptive"}
         body["output_config"] = {"effort": effort}
@@ -728,12 +736,19 @@ def call_claude_api(model_name, system_prompt, user_prompt, reasoning_level):
 
     logger.debug(f"Claude API call: model={model_name}, reasoning={reasoning_level}")
 
-    resp = requests.post(url, headers=headers, json=body, timeout=120)
+    resp = requests.post(url, headers=headers, json=body, timeout=240)
     if resp.status_code != 200:
         logger.error(f"Claude API error {resp.status_code}: {resp.text[:300]}")
         raise Exception(f"Claude API error: {resp.status_code}")
 
     data = resp.json()
+
+    usage = data.get("usage", {})
+    logger.debug(
+        "Claude usage: input=%s, output=%s, cache_read=%s, cache_create=%s",
+        usage.get("input_tokens"), usage.get("output_tokens"),
+        usage.get("cache_read_input_tokens"), usage.get("cache_creation_input_tokens"),
+    )
 
     # Extract text from content blocks (skip thinking blocks)
     text_parts = []
