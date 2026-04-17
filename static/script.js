@@ -2,6 +2,13 @@ const BOARD_SIZE = 9;
 const SENTE = 1;
 const GOTE = -1;
 
+// localStorage keys (single source of truth)
+const STORAGE_KEYS = {
+    session: 'shogi_session_id',
+    state: 'shogi_state',
+    aiSettings: 'shogi_ai_settings'
+};
+
 // Single source of truth for AI model options
 const MODEL_OPTIONS = [
     { value: "gemini-3.1-pro-preview-high", label: "Gemini 3.1 Pro Preview High" },
@@ -115,15 +122,15 @@ function saveAiSettings() {
         matchPrefix: gMatchPrefix,
         matchMoves: gMatchMoves
     };
-    localStorage.setItem('shogi_ai_settings', JSON.stringify(settings));
+    localStorage.setItem(STORAGE_KEYS.aiSettings, JSON.stringify(settings));
 }
 
 // Session Management (Local Only)
 function getSessionId() {
-    let sid = localStorage.getItem('shogi_session_id');
+    let sid = localStorage.getItem(STORAGE_KEYS.session);
     if (!sid) {
         sid = 'sess_' + Math.random().toString(36).substr(2, 9);
-        localStorage.setItem('shogi_session_id', sid);
+        localStorage.setItem(STORAGE_KEYS.session, sid);
     }
     return sid;
 }
@@ -192,7 +199,7 @@ function updateGameState(newState) {
     }
 
     gameState = sanitized;
-    localStorage.setItem('shogi_state', JSON.stringify(gameState));
+    localStorage.setItem(STORAGE_KEYS.state, JSON.stringify(gameState));
 
     // Sync models if present (Persistence fix)
     if (gameState.sente_model) gSenteModel = gameState.sente_model;
@@ -202,7 +209,7 @@ function updateGameState(newState) {
 }
 
 function loadLocalState() {
-    const saved = localStorage.getItem('shogi_state');
+    const saved = localStorage.getItem(STORAGE_KEYS.state);
     if (saved) {
         try {
             const parsed = JSON.parse(saved);
@@ -211,14 +218,13 @@ function loadLocalState() {
                 updateGameState(sanitized);
                 return true;
             } else {
-                // Invalid data, clear it
                 console.warn("Clearing corrupted local storage");
-                localStorage.removeItem('shogi_state');
+                localStorage.removeItem(STORAGE_KEYS.state);
                 return false;
             }
         } catch (e) {
             console.error("Local state parse error", e);
-            localStorage.removeItem('shogi_state');
+            localStorage.removeItem(STORAGE_KEYS.state);
             return false;
         }
     }
@@ -509,17 +515,19 @@ function renderStatus() {
     }
 }
 
-function onHandClick(name) {
-    if (gameState.game_over) return;
-    // 人間 vs AI モード（vs_ai=true）では先手のみプレイ可能（後手はAI）
-    // 人間対人間モード（vs_ai=false かつ ai_vs_ai=false）では両方プレイ可能
-    if (gameState.vs_ai && gameState.turn !== SENTE) return;
-
-    // In AI/Mixed mode, prevent human from moving if it's not their turn (i.e. model is not 'human')
+// 現在手番でユーザー操作が可能かを判定（vs AI / AI vs AI / 人間対人間を統一扱い）
+function canHumanPlay() {
+    if (!gameState || gameState.game_over) return false;
+    if (gameState.vs_ai && gameState.turn !== SENTE) return false;
     if (gameState.ai_vs_ai_mode) {
         const currentModel = (gameState.turn === SENTE) ? gSenteModel : gGoteModel;
-        if (currentModel !== 'human') return;
+        if (currentModel !== 'human') return false;
     }
+    return true;
+}
+
+function onHandClick(name) {
+    if (!canHumanPlay()) return;
 
     // 自分の持駒だけを選択可能にする（相手の持駒はクリックしても無効）
     const myHand = gameState.hands[gameState.turn];
@@ -534,16 +542,7 @@ function onHandClick(name) {
 }
 
 async function onBoardClick(x, y) {
-    if (gameState.game_over) return;
-    // 人間 vs AI モード（vs_ai=true）では先手のみプレイ可能（後手はAI）
-    // 人間対人間モード（vs_ai=false かつ ai_vs_ai=false）では両方プレイ可能
-    if (gameState.vs_ai && gameState.turn !== SENTE) return;
-
-    // In AI/Mixed mode, prevent human from moving if it's not their turn
-    if (gameState.ai_vs_ai_mode) {
-        const currentModel = (gameState.turn === SENTE) ? gSenteModel : gGoteModel;
-        if (currentModel !== 'human') return;
-    }
+    if (!canHumanPlay()) return;
 
     if (selected) {
         if (selected.type === 'board') {
@@ -798,12 +797,7 @@ async function downloadMatchAudio() {
             const audioDir = gVideoMode ? `${rootFolder}/audio` : rootFolder;
 
             for (const file of audioFiles) {
-                const binaryString = atob(file.audioData);
-                const bytes = new Uint8Array(binaryString.length);
-                for (let i = 0; i < binaryString.length; i++) {
-                    bytes[i] = binaryString.charCodeAt(i);
-                }
-                const wavData = createWavFile(bytes);
+                const wavData = createWavFile(base64ToBytes(file.audioData));
                 zip.file(`${audioDir}/${file.filename}`, wavData);
             }
         }
@@ -812,12 +806,7 @@ async function downloadMatchAudio() {
         if (gVideoMode && screenshots && screenshots.length > 0) {
             screenshots.sort((a, b) => a.moveCount - b.moveCount);
             for (const ss of screenshots) {
-                const binaryString = atob(ss.imageData);
-                const bytes = new Uint8Array(binaryString.length);
-                for (let i = 0; i < binaryString.length; i++) {
-                    bytes[i] = binaryString.charCodeAt(i);
-                }
-                zip.file(`${rootFolder}/images/${ss.filename}`, bytes);
+                zip.file(`${rootFolder}/images/${ss.filename}`, base64ToBytes(ss.imageData));
             }
         }
 
@@ -897,45 +886,26 @@ function createWavFile(pcmData) {
 }
 
 // ========== TTS Audio Playback and Save Functions ==========
+function base64ToBytes(base64) {
+    const binaryString = atob(base64);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes;
+}
+
 function playTtsAudio(base64Audio) {
     if (!base64Audio) return;
     try {
-        const binaryString = atob(base64Audio);
-        const bytes = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i++) {
-            bytes[i] = binaryString.charCodeAt(i);
-        }
-        const sampleRate = 24000;
-        const numChannels = 1;
-        const bitsPerSample = 16;
-        const byteRate = sampleRate * numChannels * bitsPerSample / 8;
-        const blockAlign = numChannels * bitsPerSample / 8;
-        const dataSize = bytes.length;
-        const headerSize = 44;
-        const fileSize = headerSize + dataSize - 8;
-        const wavBuffer = new ArrayBuffer(headerSize + dataSize);
-        const view = new DataView(wavBuffer);
-        writeString(view, 0, 'RIFF');
-        view.setUint32(4, fileSize, true);
-        writeString(view, 8, 'WAVE');
-        writeString(view, 12, 'fmt ');
-        view.setUint32(16, 16, true);
-        view.setUint16(20, 1, true);
-        view.setUint16(22, numChannels, true);
-        view.setUint32(24, sampleRate, true);
-        view.setUint32(28, byteRate, true);
-        view.setUint16(32, blockAlign, true);
-        view.setUint16(34, bitsPerSample, true);
-        writeString(view, 36, 'data');
-        view.setUint32(40, dataSize, true);
-        const wavBytes = new Uint8Array(wavBuffer);
-        wavBytes.set(bytes, headerSize);
-        const blob = new Blob([wavBuffer], { type: 'audio/wav' });
+        const bytes = base64ToBytes(base64Audio);
+        const wavData = createWavFile(bytes);
+        const blob = new Blob([wavData], { type: 'audio/wav' });
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
         audio.play().catch(e => console.error('TTS playback error:', e));
         audio.onended = () => URL.revokeObjectURL(url);
-        return wavBuffer;
+        return wavData;
     } catch (e) {
         console.error('TTS audio processing error:', e);
         return null;
@@ -952,14 +922,7 @@ function saveTtsAudioFile(base64Audio, moveCount, moveStr) {
     if (!base64Audio) return;
 
     try {
-        // Decode base64 to binary
-        const binaryString = atob(base64Audio);
-        const bytes = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i++) {
-            bytes[i] = binaryString.charCodeAt(i);
-        }
-
-        // Create WAV file
+        const bytes = base64ToBytes(base64Audio);
         const wavData = createWavFile(bytes);
 
         // Generate filename
@@ -1180,7 +1143,7 @@ async function startAiVsAiMatch(isResume = false) {
         String(now.getSeconds()).padStart(2, '0');
     const cleanS = sModel.replace(/[^a-zA-Z0-9.\-_]/g, '');
     const cleanG = gModel.replace(/[^a-zA-Z0-9.\-_]/g, '');
-    gMatchPrefix = `${dateStr}_${cleanS}_vs_${cleanG} `;
+    gMatchPrefix = `${dateStr}_${cleanS}_vs_${cleanG}`;
     saveAiSettings();
 
     // Update model name labels
@@ -1391,8 +1354,8 @@ async function processAiVsAi(matchId) {
                     usi: result.usi || '',
                     move_ja: result.move_str_ja,
                     reasoning: result.reasoning || '',
-                    image: imgFile ? `images / ${imgFile} ` : null,
-                    audio: `audio / ${paddedCount}_${cleanMove}.wav`
+                    image: imgFile ? `images/${imgFile}` : null,
+                    audio: `audio/${paddedCount}_${cleanMove}.wav`
                 });
                 saveAiSettings(); // Persist metadata to localStorage
             }
@@ -1423,7 +1386,7 @@ window.onload = async () => {
     initTtsUI();
 
     // Restore AI settings from localStorage
-    const savedSettings = localStorage.getItem('shogi_ai_settings');
+    const savedSettings = localStorage.getItem(STORAGE_KEYS.aiSettings);
     if (savedSettings) {
         try {
             const settings = JSON.parse(savedSettings);

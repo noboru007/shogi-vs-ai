@@ -1,7 +1,6 @@
 import os
 import re
 import json
-import copy
 import sys
 import logging
 import time
@@ -13,7 +12,7 @@ from flask_cors import CORS
 import google.generativeai as genai
 import requests
 
-from game_logic import ShogiGame, SENTE, GOTE, CPU_DEPTH, SFEN_MAP
+from game_logic import ShogiGame, SENTE, GOTE, parse_usi_string, to_usi
 
 try:
     from openai import OpenAI
@@ -27,16 +26,6 @@ if not logger.handlers:
     _handler = logging.StreamHandler(sys.stdout)
     _handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
     logger.addHandler(_handler)
-
-def log_info(msg):
-    logger.info(msg)
-
-def log_debug(msg):
-    logger.debug(msg)
-
-def log_error(msg):
-    logger.error(msg)
-
 
 load_dotenv()
 
@@ -130,7 +119,7 @@ def generate_tts_audio(text, model_name, turn, is_fallback=False):
     """
     google_api_key = os.getenv("GOOGLE_API_KEY")
     if not google_api_key:
-        log_error("TTS: GOOGLE_API_KEY not set")
+        logger.error("TTS: GOOGLE_API_KEY not set")
         return None
     
     tts_config = get_tts_config(model_name, is_fallback)
@@ -165,17 +154,16 @@ def generate_tts_audio(text, model_name, turn, is_fallback=False):
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            log_info(f"TTS: Generating audio with voice={voice_name}, model={TTS_MODEL} (attempt {attempt+1}/{max_retries})")
+            logger.info(f"TTS: Generating audio with voice={voice_name}, model={TTS_MODEL} (attempt {attempt+1}/{max_retries})")
             resp = requests.post(url, headers=headers, json=payload, timeout=60)
             
             if resp.status_code == 500 and attempt < max_retries - 1:
-                log_error(f"TTS API 500 error (attempt {attempt+1}), retrying in 2s...")
-                import time
+                logger.error(f"TTS API 500 error (attempt {attempt+1}), retrying in 2s...")
                 time.sleep(2)
                 continue
             
             if resp.status_code != 200:
-                log_error(f"TTS API error: {resp.status_code} {resp.text[:200]}")
+                logger.error(f"TTS API error: {resp.status_code} {resp.text[:200]}")
                 return None
             
             resp_json = resp.json()
@@ -183,21 +171,20 @@ def generate_tts_audio(text, model_name, turn, is_fallback=False):
             # Extract base64 audio data
             try:
                 audio_data = resp_json['candidates'][0]['content']['parts'][0]['inlineData']['data']
-                log_info(f"TTS: Successfully generated audio, size={len(audio_data)} chars")
+                logger.info(f"TTS: Successfully generated audio, size={len(audio_data)} chars")
                 return audio_data
             except (KeyError, IndexError) as e:
-                log_error(f"TTS: Failed to parse response: {e}")
+                logger.error(f"TTS: Failed to parse response: {e}")
                 return None
                 
         except requests.exceptions.Timeout:
-            log_error(f"TTS: Request timeout (attempt {attempt+1})")
+            logger.error(f"TTS: Request timeout (attempt {attempt+1})")
             if attempt < max_retries - 1:
-                import time
                 time.sleep(2)
                 continue
             return None
         except Exception as e:
-            log_error(f"TTS: Request failed: {e}")
+            logger.error(f"TTS: Request failed: {e}")
             return None
     
     return None
@@ -244,10 +231,6 @@ def index():
 def health_check():
     return jsonify({'status': 'ok'})
 
-@app.route('/api/game', methods=['GET'])
-def get_game_state():
-    return jsonify({'status': 'ok', 'message': 'Server is stateless. Use local state.'})
-
 @app.route('/api/reset', methods=['POST'])
 def reset_game():
     data = request.json
@@ -270,43 +253,6 @@ def reset_game():
         'status': 'ok',
         'game_state': get_full_state(game, data)
     })
-
-# Helper: Parse USI string to internal move dict
-def parse_usi_string(usi):
-    files = "987654321"
-    ranks = "abcdefghi"
-    
-    # Drop: P*5e
-    if '*' in usi:
-        name_char, pos_str = usi.split('*')
-        CHAR_TO_KANJI = {v: k for k, v in SFEN_MAP.items()}
-        name = CHAR_TO_KANJI.get(name_char.upper(), name_char)
-        
-        tx = files.index(pos_str[0])
-        ty = ranks.index(pos_str[1])
-        
-        return {
-            'type': 'drop',
-            'name': name,
-            'to': [tx, ty]
-        }
-    else:
-        promote = False
-        if usi.endswith('+'):
-            promote = True
-            usi = usi[:-1]
-            
-        sx = files.index(usi[0])
-        sy = ranks.index(usi[1])
-        tx = files.index(usi[2])
-        ty = ranks.index(usi[3])
-        
-        return {
-            'type': 'move',
-            'from': [sx, sy],
-            'to': [tx, ty],
-            'promote': promote
-        }
 
 # Favicon silencing
 @app.route('/favicon.ico')
@@ -344,79 +290,47 @@ def make_move():
         if owner != SENTE and game.vs_ai:
              return jsonify({'status': 'error', 'message': 'Not your turn'}), 400
 
+    legal_moves = game.get_legal_moves(game.turn)
+
     if move_type == 'move':
-        moves = game.get_legal_moves(game.turn)
-        legal = False
         start = tuple(data.get('from'))
         end = tuple(data.get('to'))
         promote = data.get('promote', False)
-
-        for m in moves:
-            if m['type'] == 'move' and m['from'] == start and m['to'] == end:
-                if m['promote'] == promote:
-                    legal = True
-                    break
-        
-        if legal:
-            # Generate JP string BEFORE making move
-            move_dict = {'type': 'move', 'from': start, 'to': end, 'promote': promote}
-            move_str_ja = get_japanese_move_str(game, move_dict)
-            current_move_count = game.move_count
-
-            game.make_move('move', start, end, game.turn, promote)
-            game.switch_turn()
-            
-            if len(game.get_legal_moves(game.turn)) == 0:
-                game.game_over = True
-            
-            return jsonify({
-                'status': 'ok', 
-                'game_state': get_full_state(game, ai_settings=req_data),
-                'move_str_ja': move_str_ja,
-                'move_count': current_move_count
-            })
-            
+        move_dict = {'type': 'move', 'from': start, 'to': end, 'promote': promote}
+        is_legal = any(
+            m['type'] == 'move' and m['from'] == start and m['to'] == end and m['promote'] == promote
+            for m in legal_moves
+        )
+        make_args = ('move', start, end, game.turn, promote)
     elif move_type == 'drop':
-        legal = False
         name = data.get('name')
         to_pos = tuple(data.get('to'))
-        moves = game.get_legal_moves(game.turn)
-        for m in moves:
-            if m['type'] == 'drop' and m['name'] == name and m['to'] == to_pos:
-                legal = True
-                break
-                
-        if legal:
-            # Generate JP string BEFORE making move
-            move_dict = {'type': 'drop', 'name': name, 'to': to_pos}
-            move_str_ja = get_japanese_move_str(game, move_dict)
-            current_move_count = game.move_count
+        move_dict = {'type': 'drop', 'name': name, 'to': to_pos}
+        is_legal = any(
+            m['type'] == 'drop' and m['name'] == name and m['to'] == to_pos
+            for m in legal_moves
+        )
+        make_args = ('drop', name, to_pos, game.turn)
+    else:
+        return jsonify({'status': 'error', 'message': 'Unknown move type'}), 400
 
-            game.make_move('drop', name, to_pos, game.turn)
-            game.switch_turn()
-            
-            if len(game.get_legal_moves(game.turn)) == 0:
-                game.game_over = True
+    if not is_legal:
+        return jsonify({'status': 'error', 'message': 'Invalid or Illegal move', 'debug': str(move_dict)}), 400
 
-            return jsonify({
-                'status': 'ok', 
-                'game_state': get_full_state(game, ai_settings=req_data),
-                'move_str_ja': move_str_ja,
-                'move_count': current_move_count
-            })
-        else:
-             kanji_name = name 
-             hand_count = game.hands[game.turn].get(kanji_name, 0)
-             debug_info = {
-                 'reason': 'Drop failed',
-                 'name': name,
-                 'end': to_pos,
-                 'hand_count': hand_count
-             }
-             
-        return jsonify({'status': 'error', 'message': 'Invalid or Illegal move', 'debug': str(debug_info)}), 400
+    move_str_ja = get_japanese_move_str(game, move_dict)
+    current_move_count = game.move_count
+    game.make_move(*make_args)
+    game.switch_turn()
 
-    return jsonify({'status': 'error', 'message': 'Unknown move type'}), 400
+    if len(game.get_legal_moves(game.turn)) == 0:
+        game.game_over = True
+
+    return jsonify({
+        'status': 'ok',
+        'game_state': get_full_state(game, ai_settings=req_data),
+        'move_str_ja': move_str_ja,
+        'move_count': current_move_count
+    })
 
 # Helper: Convert move to Japanese notation
 def get_japanese_move_str(game, move_dict):
@@ -466,7 +380,7 @@ def cpu_move():
     is_maximizing = (game.turn == GOTE)
     
     try:
-        log_info("CPU Thinking (Iterative Deepening)...")
+        logger.info("CPU Thinking (Iterative Deepening)...")
         best_val, best_move = game.iterative_deepening(is_maximizing)
         if best_move:
             # Generate JP string BEFORE making move (to see source piece)
@@ -498,29 +412,7 @@ def cpu_move():
                 'game_state': get_full_state(game, ai_settings=req_data)
             }) 
     except Exception as e:
-        import traceback
         return jsonify({'status': 'error', 'message': str(e), 'trace': traceback.format_exc()}), 500
-
-
-# Helper for USI conversion
-def to_usi(move):
-    files = "987654321"
-    ranks = "abcdefghi"
-    
-    if move["type"] == "drop":
-        char = SFEN_MAP.get(move["name"])
-        if not char: return None
-        if char.startswith("+"): char = char[1:] 
-        tx, ty = move["to"]
-        return f"{char}*{files[tx]}{ranks[ty]}"
-        
-    elif move["type"] == "move":
-        # Move: 7g7f or 7g7f+
-        sx, sy = move["from"]
-        tx, ty = move["to"]
-        promote = "+" if move["promote"] else ""
-        return f"{files[sx]}{ranks[sy]}{files[tx]}{ranks[ty]}{promote}"
-    return None
 
 
 # ========== LLM Move Helper Functions ==========
@@ -628,8 +520,8 @@ def build_prompts(game, turn, req_data, legal_moves_usi):
 
     # Log Prompts at Game Start
     if game.move_count <= 2:
-        log_info(f"=== SYSTEM PROMPT (Start of Game) ===\n{system_prompt}\n=====================================")
-        log_info(f"=== USER PROMPT (Start of Game) ===\n{user_prompt}\n===================================")
+        logger.info(f"=== SYSTEM PROMPT (Start of Game) ===\n{system_prompt}\n=====================================")
+        logger.info(f"=== USER PROMPT (Start of Game) ===\n{user_prompt}\n===================================")
 
     return system_prompt, user_prompt
 
@@ -669,7 +561,7 @@ def _call_openai_responses(model_name, system_prompt, user_prompt, api_key, reas
         raise Exception(f"OpenAI v1/responses error: {resp.status_code} {resp.text}")
     
     resp_json = resp.json()
-    log_debug(f"v1/responses keys: {list(resp_json.keys())}")
+    logger.debug(f"v1/responses keys: {list(resp_json.keys())}")
     
     # Check if async polling is needed
     should_poll = False
@@ -688,7 +580,7 @@ def _call_openai_responses(model_name, system_prompt, user_prompt, api_key, reas
 def _poll_openai_response(response_id, headers):
     """Poll OpenAI async response until completion."""
     poll_url = f"https://api.openai.com/v1/responses/{response_id}"
-    log_debug(f"Async Response ID: {response_id}. Polling...")
+    logger.debug(f"Async Response ID: {response_id}. Polling...")
     
     for i in range(240):  # Poll for up to 20 mins
         time.sleep(5)
@@ -696,12 +588,12 @@ def _poll_openai_response(response_id, headers):
         if poll_resp.status_code == 200:
             poll_data = poll_resp.json()
             if 'choices' in poll_data or 'output' in poll_data:
-                log_debug(f"Poll success after {i+1} tries.")
+                logger.debug(f"Poll success after {i+1} tries.")
                 return poll_data
             elif poll_data.get('status') == 'failed':
                 raise Exception("Async response processing failed.")
         else:
-            log_debug(f"Poll failed {poll_resp.status_code}")
+            logger.debug(f"Poll failed {poll_resp.status_code}")
     
     raise Exception("Async response timed out.")
 
@@ -773,7 +665,7 @@ def _call_gemini_rest_with_thinking(model_name, system_prompt, user_prompt, thin
         }
     }
     
-    log_debug(f"Calling Gemini REST API with Thinking (Level: {thinking_level})")
+    logger.debug(f"Calling Gemini REST API with Thinking (Level: {thinking_level})")
     resp = requests.post(url, headers=headers, json=payload, timeout=1200)
     
     if resp.status_code != 200:
@@ -788,7 +680,7 @@ def _call_gemini_rest_with_thinking(model_name, system_prompt, user_prompt, thin
                 text += part['text'] + "\n"
         return text
     except Exception as e:
-        log_error(f"DEBUG: Failed to parse Gemini REST response: {e}")
+        logger.error(f"DEBUG: Failed to parse Gemini REST response: {e}")
         return str(resp_json)
 
 
@@ -830,15 +722,15 @@ def call_claude_api(model_name, system_prompt, user_prompt, reasoning_level):
         effort = reasoning_level if reasoning_level in ("max", "high", "medium", "low") else "high"
         body["thinking"] = {"type": "adaptive"}
         body["output_config"] = {"effort": effort}
-        log_debug(f"Claude Adaptive Thinking: effort={effort}")
+        logger.debug(f"Claude Adaptive Thinking: effort={effort}")
     else:
         body["temperature"] = 0.2
 
-    log_debug(f"Claude API call: model={model_name}, reasoning={reasoning_level}")
+    logger.debug(f"Claude API call: model={model_name}, reasoning={reasoning_level}")
 
     resp = requests.post(url, headers=headers, json=body, timeout=120)
     if resp.status_code != 200:
-        log_error(f"Claude API error {resp.status_code}: {resp.text[:300]}")
+        logger.error(f"Claude API error {resp.status_code}: {resp.text[:300]}")
         raise Exception(f"Claude API error: {resp.status_code}")
 
     data = resp.json()
@@ -850,7 +742,7 @@ def call_claude_api(model_name, system_prompt, user_prompt, reasoning_level):
             text_parts.append(block["text"])
 
     result = "\n".join(text_parts)
-    log_debug(f"Claude response ({len(result)} chars): {result[:200]}")
+    logger.debug(f"Claude response ({len(result)} chars): {result[:200]}")
     return result
 
 
@@ -887,7 +779,7 @@ def parse_llm_response(text):
             usi_move = cand
             break
         else:
-            log_debug(f"Skipping invalid candidate: {cand}")
+            logger.debug(f"Skipping invalid candidate: {cand}")
 
     return usi_move, reasoning
 
@@ -900,7 +792,7 @@ def validate_and_execute_move(game, usi_move, turn, legal_moves_usi):
     try:
         parsed_move = parse_usi_string(usi_move)
     except Exception as e:
-        log_debug(f"Failed to parse USI: {usi_move} with error: {e}")
+        logger.debug(f"Failed to parse USI: {usi_move} with error: {e}")
         return False, None
 
     # Check if strictly legal
@@ -917,16 +809,16 @@ def validate_and_execute_move(game, usi_move, turn, legal_moves_usi):
             sx, sy = parsed_move['from']
             p = game.board[sy][sx]
             if p and not game.can_promote(sy, parsed_move['to'][1], turn, p['name']):
-                log_debug(f"Illegal Promotion Detected: {usi_move}")
+                logger.debug(f"Illegal Promotion Detected: {usi_move}")
                 is_possible = False
     elif move_type == 'drop':
         is_possible = game.is_physically_possible('drop', parsed_move['name'], parsed_move['to'], turn)
     
     if is_possible:
-        log_debug(f"Permitting physically possible but strictly illegal move: {usi_move}")
+        logger.debug(f"Permitting physically possible but strictly illegal move: {usi_move}")
         return True, parsed_move
     
-    log_debug(f"Move is physically impossible: {usi_move}")
+    logger.debug(f"Move is physically impossible: {usi_move}")
     return False, None
 
 
@@ -998,10 +890,10 @@ def cpu_fallback(game, turn, last_error, tts_enabled, model_name, ai_settings):
 @app.route('/api/llm_move', methods=['POST'])
 def llm_move():
     session_id = request.headers.get('X-Session-ID', 'default_session')
-    log_debug(f"llm_move called (Stateless) Session: {session_id}")
+    logger.debug(f"llm_move called (Stateless) Session: {session_id}")
     
     if not api_key:
-        log_error("ERROR: API Key not configured")
+        logger.error("ERROR: API Key not configured")
         return jsonify({'status': 'error', 'message': 'API Key not configured'}), 500
 
     try:
@@ -1021,7 +913,7 @@ def llm_move():
         raw_model_name = sente_model if turn == SENTE else gote_model
         model_name, display_model_name, reasoning_level = parse_model_name(raw_model_name)
         
-        log_debug(f"Turn: {turn}, Model: {model_name}, Reasoning: {reasoning_level}")
+        logger.debug(f"Turn: {turn}, Model: {model_name}, Reasoning: {reasoning_level}")
 
         # Build legal moves list
         legal_moves = game.get_legal_moves(turn)
@@ -1041,20 +933,20 @@ def llm_move():
 
             try:
                 text = call_llm(model_name, system_prompt, current_user_prompt, reasoning_level)
-                log_debug(f"Raw LLM Response: {text}")
+                logger.debug(f"Raw LLM Response: {text}")
 
                 usi_move, reasoning = parse_llm_response(text)
                 
                 if not usi_move:
-                    log_debug(f"No USI found in response.")
+                    logger.debug(f"No USI found in response.")
                     last_error = f"LLMの一手と理由: {usi_move}.  {reasoning}"
                     continue
 
-                log_debug(f"Found valid USI move: {usi_move}")
+                logger.debug(f"Found valid USI move: {usi_move}")
                 move_executed, parsed_move = validate_and_execute_move(game, usi_move, turn, legal_moves_usi)
 
                 if not move_executed:
-                    log_debug("Invalid move. Retrying...")
+                    logger.debug("Invalid move. Retrying...")
                     last_error = f"LLMの一手と理由: {usi_move}.  {reasoning}"
                     continue
 
@@ -1062,11 +954,11 @@ def llm_move():
                 move_str_ja = get_japanese_move_str(game, parsed_move)
                 current_move_count = game.move_count
                 apply_move(game, parsed_move, turn)
-                log_debug(f"Post-Move SFEN: {game.get_sfen()}")
+                logger.debug(f"Post-Move SFEN: {game.get_sfen()}")
 
                 # Check if previous move was fatal (king can be captured)
                 if game.can_capture_king(game.turn):
-                    log_debug("King Capture allowed! Previous move was fatal.")
+                    logger.debug("King Capture allowed! Previous move was fatal.")
                     game.game_over = True
                     winner_name = "Sente" if game.turn == SENTE else "Gote"
                     return jsonify({
@@ -1084,7 +976,7 @@ def llm_move():
                 winner = None
                 if check_game_over(game):
                     winner = "Sente" if game.turn == GOTE else "Gote"
-                    log_debug(f"Game Over. Winner: {winner}")
+                    logger.debug(f"Game Over. Winner: {winner}")
 
                 response_data = {
                     'status': 'ok',
@@ -1107,16 +999,16 @@ def llm_move():
                 return jsonify(response_data)
 
             except Exception as e:
-                log_error(f"ERROR inside attempt loop: {e}")
+                logger.error(f"ERROR inside attempt loop: {e}")
                 last_error = str(e)
                 continue
 
         # All retries exhausted — CPU fallback
-        log_error(f"ERROR: Max retries reached. Last Error: {last_error}. Switching to CPU Fallback.")
+        logger.error(f"ERROR: Max retries reached. Last Error: {last_error}. Switching to CPU Fallback.")
         return jsonify(cpu_fallback(game, turn, last_error, tts_enabled, model_name, ai_settings))
 
     except Exception as e:
-        log_error(f"CRITICAL ERROR in llm_move: {e}")
+        logger.error(f"CRITICAL ERROR in llm_move: {e}")
         traceback.print_exc()
         return jsonify({'status': 'error', 'message': str(e)}), 500
 

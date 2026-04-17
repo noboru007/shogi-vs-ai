@@ -1,6 +1,9 @@
 import copy
+import logging
 import random
 import time
+
+logger = logging.getLogger("shogi")
 
 # === 設定 ===
 CPU_DEPTH = 3           # 最大探索深度
@@ -123,10 +126,56 @@ PST_MAP = {
     "馬": PST_BISHOP, "竜": PST_ROOK,
 }
 
-# 成駒のマッピング (元駒 -> 成駒)
+# 成駒のマッピング (成駒 -> 元駒)
 UNPROMOTION_MAP = {
     "と": "歩", "杏": "香", "圭": "桂", "全": "銀", "馬": "角", "竜": "飛"
 }
+
+# USI変換用マッピング
+SFEN_CHAR_TO_KANJI = {v: k for k, v in SFEN_MAP.items()}
+USI_FILES = "987654321"
+USI_RANKS = "abcdefghi"
+
+
+def parse_usi_string(usi):
+    """USI文字列を内部の move dict に変換する。
+    - ドロップ: 'P*5e' 形式
+    - 移動: '7g7f' / '7g7f+' 形式
+    """
+    if '*' in usi:
+        name_char, pos_str = usi.split('*')
+        name = SFEN_CHAR_TO_KANJI.get(name_char.upper(), name_char)
+        tx = USI_FILES.index(pos_str[0])
+        ty = USI_RANKS.index(pos_str[1])
+        return {'type': 'drop', 'name': name, 'to': [tx, ty]}
+
+    promote = False
+    if usi.endswith('+'):
+        promote = True
+        usi = usi[:-1]
+    sx = USI_FILES.index(usi[0])
+    sy = USI_RANKS.index(usi[1])
+    tx = USI_FILES.index(usi[2])
+    ty = USI_RANKS.index(usi[3])
+    return {'type': 'move', 'from': [sx, sy], 'to': [tx, ty], 'promote': promote}
+
+
+def to_usi(move):
+    """内部 move dict を USI 文字列に変換する。"""
+    if move["type"] == "drop":
+        char = SFEN_MAP.get(move["name"])
+        if not char:
+            return None
+        if char.startswith("+"):
+            char = char[1:]
+        tx, ty = move["to"]
+        return f"{char}*{USI_FILES[tx]}{USI_RANKS[ty]}"
+    if move["type"] == "move":
+        sx, sy = move["from"]
+        tx, ty = move["to"]
+        promote = "+" if move["promote"] else ""
+        return f"{USI_FILES[sx]}{USI_RANKS[sy]}{USI_FILES[tx]}{USI_RANKS[ty]}{promote}"
+    return None
 
 # 駒の動き定義
 PIECES = {
@@ -194,14 +243,8 @@ class ShogiGame:
         self.move_count += 1
 
     def add_to_hand(self, owner, piece_name):
-        original_names = {
-            "と": "歩", "杏": "香", "圭": "桂", "全": "銀", "馬": "角", "竜": "飛"
-        }
-        name = original_names.get(piece_name, piece_name)
-        if name in self.hands[owner]:
-            self.hands[owner][name] += 1
-        else:
-            self.hands[owner][name] = 1
+        name = UNPROMOTION_MAP.get(piece_name, piece_name)
+        self.hands[owner][name] = self.hands[owner].get(name, 0) + 1
 
     def is_pseudo_valid_move(self, start, end, piece, owner):
         sx, sy = start
@@ -324,7 +367,8 @@ class ShogiGame:
         
         try:
             res = self.apply_move_internal(move_type, start_or_name, end, owner, promote, self.board)
-        except Exception:
+        except Exception as e:
+            logger.debug("simulate_move_check failed: %s", e)
             res = False
         finally:
             self.board = backup_board_ref
@@ -689,25 +733,15 @@ class ShogiGame:
         turn_sfen = "b" if self.turn == SENTE else "w"
         
         hands_sfen = ""
-        has_hand = False
-        
-        # 先手
-        for name, count in self.hands[SENTE].items():
-            if count > 0:
-                has_hand = True
+        for owner in (SENTE, GOTE):
+            for name, count in self.hands[owner].items():
+                if count <= 0:
+                    continue
                 char = SFEN_MAP[name]
-                if count > 1: hands_sfen += str(count) + char
-                else: hands_sfen += char
-        
-        # 後手
-        for name, count in self.hands[GOTE].items():
-            if count > 0:
-                has_hand = True
-                char = SFEN_MAP[name].lower()
-                if count > 1: hands_sfen += str(count) + char
-                else: hands_sfen += char
-                
-        if not has_hand:
+                if owner == GOTE:
+                    char = char.lower()
+                hands_sfen += (str(count) if count > 1 else "") + char
+        if not hands_sfen:
             hands_sfen = "-"
             
         return f"{board_sfen} {turn_sfen} {hands_sfen} {self.move_count}"
@@ -789,9 +823,8 @@ class ShogiGame:
                         i += 1
 
         except Exception as e:
-            print(f"Error parsing SFEN: {e}")
-            # Fallback to init? Or raise?
-            raise e
+            logger.error("Error parsing SFEN: %s", e)
+            raise
 
     def _apply_move(self, move, owner):
         """手を適用し、undo情報を返す（copy.deepcopy不要の高速化）"""
@@ -895,84 +928,64 @@ class ShogiGame:
         scored.sort(key=lambda x: (-x[0], x[1]))  # スコア降順、同点はランダム
         return [m for _, _, m in scored]
 
+    def _generate_captures(self, owner):
+        """指定 owner の駒取りの手だけを列挙する。"""
+        captures = []
+        for y in range(BOARD_SIZE):
+            for x in range(BOARD_SIZE):
+                p = self.board[y][x]
+                if not p or p["owner"] != owner:
+                    continue
+                for ty in range(BOARD_SIZE):
+                    for tx in range(BOARD_SIZE):
+                        target = self.board[ty][tx]
+                        if not target or target["owner"] == owner:
+                            continue
+                        if not self.is_pseudo_valid_move((x, y), (tx, ty), p, owner):
+                            continue
+                        if self.simulate_move_check("move", (x, y), (tx, ty), owner, promote=False):
+                            captures.append({"type": "move", "from": (x, y), "to": (tx, ty), "promote": False})
+                        if self.can_promote(y, ty, owner, p["name"]) and \
+                                self.simulate_move_check("move", (x, y), (tx, ty), owner, promote=True):
+                            captures.append({"type": "move", "from": (x, y), "to": (tx, ty), "promote": True})
+        return captures
+
     def _quiescence_search(self, alpha, beta, maximizing, depth):
         """静止探索: 駒取りの手だけを追加探索して交換を正確に評価"""
         stand_pat = self.evaluate_board()
-
         if depth <= 0:
             return stand_pat
+
+        owner = GOTE if maximizing else SENTE
 
         if maximizing:
             if stand_pat >= beta:
                 return beta
             if stand_pat > alpha:
                 alpha = stand_pat
-
-            owner = GOTE
-            # 駒取りの手だけを生成
-            captures = []
-            for y in range(BOARD_SIZE):
-                for x in range(BOARD_SIZE):
-                    p = self.board[y][x]
-                    if p and p["owner"] == owner:
-                        for ty in range(BOARD_SIZE):
-                            for tx in range(BOARD_SIZE):
-                                target = self.board[ty][tx]
-                                if target and target["owner"] != owner:
-                                    if self.is_pseudo_valid_move((x, y), (tx, ty), p, owner):
-                                        can_pm = self.can_promote(y, ty, owner, p["name"])
-                                        if self.simulate_move_check("move", (x, y), (tx, ty), owner, promote=False):
-                                            captures.append({"type": "move", "from": (x, y), "to": (tx, ty), "promote": False})
-                                        if can_pm:
-                                            if self.simulate_move_check("move", (x, y), (tx, ty), owner, promote=True):
-                                                captures.append({"type": "move", "from": (x, y), "to": (tx, ty), "promote": True})
-
-            captures = self._order_moves(captures, owner)
-            for move in captures:
-                undo = self._apply_move(move, owner)
-                eval_score = self._quiescence_search(alpha, beta, False, depth - 1)
-                self._undo_move(undo)
-
-                if eval_score >= beta:
-                    return beta
-                if eval_score > alpha:
-                    alpha = eval_score
-            return alpha
         else:
             if stand_pat <= alpha:
                 return alpha
             if stand_pat < beta:
                 beta = stand_pat
 
-            owner = SENTE
-            captures = []
-            for y in range(BOARD_SIZE):
-                for x in range(BOARD_SIZE):
-                    p = self.board[y][x]
-                    if p and p["owner"] == owner:
-                        for ty in range(BOARD_SIZE):
-                            for tx in range(BOARD_SIZE):
-                                target = self.board[ty][tx]
-                                if target and target["owner"] != owner:
-                                    if self.is_pseudo_valid_move((x, y), (tx, ty), p, owner):
-                                        can_pm = self.can_promote(y, ty, owner, p["name"])
-                                        if self.simulate_move_check("move", (x, y), (tx, ty), owner, promote=False):
-                                            captures.append({"type": "move", "from": (x, y), "to": (tx, ty), "promote": False})
-                                        if can_pm:
-                                            if self.simulate_move_check("move", (x, y), (tx, ty), owner, promote=True):
-                                                captures.append({"type": "move", "from": (x, y), "to": (tx, ty), "promote": True})
+        captures = self._order_moves(self._generate_captures(owner), owner)
+        for move in captures:
+            undo = self._apply_move(move, owner)
+            eval_score = self._quiescence_search(alpha, beta, not maximizing, depth - 1)
+            self._undo_move(undo)
 
-            captures = self._order_moves(captures, owner)
-            for move in captures:
-                undo = self._apply_move(move, owner)
-                eval_score = self._quiescence_search(alpha, beta, True, depth - 1)
-                self._undo_move(undo)
-
+            if maximizing:
+                if eval_score >= beta:
+                    return beta
+                if eval_score > alpha:
+                    alpha = eval_score
+            else:
                 if eval_score <= alpha:
                     return alpha
                 if eval_score < beta:
                     beta = eval_score
-            return beta
+        return alpha if maximizing else beta
 
     def _is_time_up(self):
         """制限時間チェック（100ノードごとに判定して負荷を軽減）"""
@@ -1010,44 +1023,33 @@ class ShogiGame:
         ordered_moves = game_state._order_moves(legal_moves, current_turn)
 
         best_move = None
-        if maximizing:
-            max_eval = -float('inf')
-            for move in ordered_moves:
-                undo = game_state._apply_move(move, GOTE)
-                eval_score, _ = self.minimax(game_state, depth - 1, alpha, beta, False)
-                game_state._undo_move(undo)
+        best_eval = -float('inf') if maximizing else float('inf')
+        sign = 1 if maximizing else -1
 
-                if self._search_aborted:
-                    if best_move is None:
-                        best_move = move
-                    return max_eval if max_eval > -float('inf') else eval_score, best_move
+        for move in ordered_moves:
+            undo = game_state._apply_move(move, current_turn)
+            eval_score, _ = self.minimax(game_state, depth - 1, alpha, beta, not maximizing)
+            game_state._undo_move(undo)
 
-                if eval_score > max_eval:
-                    max_eval = eval_score
+            if self._search_aborted:
+                if best_move is None:
                     best_move = move
+                unset = (maximizing and best_eval == -float('inf')) or \
+                        (not maximizing and best_eval == float('inf'))
+                return (eval_score if unset else best_eval), best_move
+
+            if (eval_score - best_eval) * sign > 0:
+                best_eval = eval_score
+                best_move = move
+
+            if maximizing:
                 alpha = max(alpha, eval_score)
-                if beta <= alpha:
-                    break
-            return max_eval, best_move
-        else:
-            min_eval = float('inf')
-            for move in ordered_moves:
-                undo = game_state._apply_move(move, SENTE)
-                eval_score, _ = self.minimax(game_state, depth - 1, alpha, beta, True)
-                game_state._undo_move(undo)
-
-                if self._search_aborted:
-                    if best_move is None:
-                        best_move = move
-                    return min_eval if min_eval < float('inf') else eval_score, best_move
-
-                if eval_score < min_eval:
-                    min_eval = eval_score
-                    best_move = move
+            else:
                 beta = min(beta, eval_score)
-                if beta <= alpha:
-                    break
-            return min_eval, best_move
+            if beta <= alpha:
+                break
+
+        return best_eval, best_move
 
     def iterative_deepening(self, maximizing, time_limit=None):
         """反復深化: 制限時間内で可能な限り深く探索する"""
@@ -1069,29 +1071,28 @@ class ShogiGame:
             val, move = self.minimax(self, depth, -float('inf'), float('inf'), maximizing)
 
             if self._search_aborted:
-                # 時間切れ: このdepthは不完全なので前回の結果を使う
                 elapsed = time.time() - self._search_start_time
-                print(f"  Depth {depth}: TIME UP ({elapsed:.1f}s, {self._nodes_searched} nodes) - using depth {reached_depth} result")
+                logger.info("Depth %d: TIME UP (%.1fs, %d nodes) - using depth %d result",
+                            depth, elapsed, self._nodes_searched, reached_depth)
                 break
 
-            # このdepthの探索が完了
             best_val = val
             best_move = move
             reached_depth = depth
             elapsed = time.time() - self._search_start_time
-            print(f"  Depth {depth}: val={val}, move={move}, time={elapsed:.1f}s, nodes={self._nodes_searched}")
+            logger.info("Depth %d: val=%s, move=%s, time=%.1fs, nodes=%d",
+                        depth, val, move, elapsed, self._nodes_searched)
 
-            # 詰みを見つけたら即終了
             if abs(val) > 90000:
-                print(f"  Mate found at depth {depth}!")
+                logger.info("Mate found at depth %d!", depth)
                 break
 
-            # 残り時間が足りなさそうなら次のdepthに行かない
-            # （次のdepthは今回の~10倍かかると推定）
             remaining = self._search_time_limit - elapsed
             if remaining < elapsed * 5:
-                print(f"  Stopping: not enough time for depth {depth + 1} (remaining={remaining:.1f}s)")
+                logger.info("Stopping: not enough time for depth %d (remaining=%.1fs)",
+                            depth + 1, remaining)
                 break
 
-        print(f"  Final: depth={reached_depth}, val={best_val}, total_time={time.time()-self._search_start_time:.1f}s")
+        logger.info("Final: depth=%d, val=%s, total_time=%.1fs",
+                    reached_depth, best_val, time.time() - self._search_start_time)
         return best_val, best_move
