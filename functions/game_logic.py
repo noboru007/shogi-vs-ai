@@ -3,6 +3,8 @@ import logging
 import random
 import time
 
+import cshogi
+
 logger = logging.getLogger("shogi")
 
 # === 設定 ===
@@ -323,19 +325,29 @@ class ShogiGame:
                     return (x, y)
         return None
 
+    def _to_cshogi_board(self, override_turn=None):
+        """Build a fresh cshogi.Board from current state.
+
+        Optionally force the side-to-move to `override_turn` (SENTE/GOTE) so
+        callers can ask "what are owner's legal moves?" even when it isn't
+        owner's turn in our internal model.
+        """
+        sfen = self.get_sfen()
+        if override_turn is not None:
+            parts = sfen.split(" ")
+            parts[1] = "b" if override_turn == SENTE else "w"
+            sfen = " ".join(parts)
+        cb = cshogi.Board()
+        cb.set_sfen(sfen)
+        return cb
+
     def is_king_in_check(self, owner):
-        king_pos = self.find_king(owner)
-        if not king_pos: return True
-        kx, ky = king_pos
-        opponent = owner * -1
-        
-        for y in range(BOARD_SIZE):
-            for x in range(BOARD_SIZE):
-                p = self.board[y][x]
-                if p and p["owner"] == opponent:
-                    if self.is_pseudo_valid_move((x, y), (kx, ky), p, opponent):
-                        return True
-        return False
+        try:
+            cb = self._to_cshogi_board(override_turn=owner)
+            return cb.is_check()
+        except Exception:
+            # Fallback: king missing or otherwise unparseable position.
+            return self.find_king(owner) is None
 
     def can_capture_king(self, attacker):
         # Check if 'attacker' can capture the opponent's King immediately
@@ -516,31 +528,22 @@ class ShogiGame:
             yield tx, ty
 
     def get_legal_moves(self, owner):
+        """Return owner's legal moves as the legacy dict format.
+
+        Delegates to cshogi for correctness (handles nifu, uchifuzume, pinned
+        pieces, mandatory promotion, etc. in C++). Output dict shape preserved:
+            {"type": "move", "from": (x, y), "to": (x, y), "promote": bool}
+            {"type": "drop", "name": <kanji>, "to": (x, y)}
+        """
+        cb = self._to_cshogi_board(override_turn=owner)
         moves = []
-        for y in range(BOARD_SIZE):
-            for x in range(BOARD_SIZE):
-                p = self.board[y][x]
-                if not p or p["owner"] != owner:
-                    continue
-                for tx, ty in self._piece_destinations(x, y, p, owner):
-                    can_pm = self.can_promote(y, ty, owner, p["name"])
-                    if self.simulate_move_check("move", (x, y), (tx, ty), owner, promote=False):
-                        moves.append({"type": "move", "from": (x, y), "to": (tx, ty), "promote": False})
-                    if can_pm and self.simulate_move_check("move", (x, y), (tx, ty), owner, promote=True):
-                        moves.append({"type": "move", "from": (x, y), "to": (tx, ty), "promote": True})
-        # 打つ手: 二歩の筋を事前計算
-        nifu_cols = {x for x in range(BOARD_SIZE) if self.has_nifu(x, owner)}
-        for name, count in self.hands[owner].items():
-            if count <= 0:
-                continue
-            for y in range(BOARD_SIZE):
-                for x in range(BOARD_SIZE):
-                    if self.board[y][x] is not None:
-                        continue
-                    if name == "歩" and x in nifu_cols:
-                        continue
-                    if self.simulate_move_check("drop", name, (x, y), owner):
-                        moves.append({"type": "drop", "name": name, "to": (x, y)})
+        for m in cb.legal_moves:
+            usi = cshogi.move_to_usi(m)
+            d = parse_usi_string(usi)
+            d["to"] = tuple(d["to"])
+            if d["type"] == "move":
+                d["from"] = tuple(d["from"])
+            moves.append(d)
         return moves
 
     def evaluate_board(self):
@@ -795,6 +798,14 @@ class ShogiGame:
         return f"{board_sfen} {turn_sfen} {hands_sfen} {self.move_count}"
 
     def from_sfen(self, sfen):
+        # Validate via cshogi first; raises if SFEN is malformed or position is illegal.
+        try:
+            _validator = cshogi.Board()
+            _validator.set_sfen(sfen)
+        except Exception as e:
+            logger.error(f"cshogi rejected SFEN: {sfen!r} ({e})")
+            raise ValueError(f"Invalid SFEN: {e}")
+
         try:
             parts = sfen.split(" ")
             board_str = parts[0]

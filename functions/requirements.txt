@@ -5,3 +5,4 @@ firebase-functions
 firebase-admin
 flask-cors
 openai
+cshogi
