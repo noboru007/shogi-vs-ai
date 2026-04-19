@@ -319,6 +319,16 @@ def make_move():
         return jsonify({'status': 'error', 'message': 'Unknown move type'}), 400
 
     if not is_legal:
+        # 王手放置による反則負け（人間側のみ適用）
+        is_human_in_vs_ai = game.vs_ai and not ai_vs_ai_mode and game.turn == SENTE
+        if is_human_in_vs_ai and game.is_king_in_check(game.turn):
+            game.game_over = True
+            return jsonify({
+                'status': 'ok',
+                'game_state': get_full_state(game, ai_settings=req_data),
+                'forfeit_reason': '王手放置による反則負け',
+                'move_count': game.move_count
+            })
         return jsonify({'status': 'error', 'message': 'Invalid or Illegal move', 'debug': str(move_dict)}), 400
 
     move_str_ja = get_japanese_move_str(game, move_dict)

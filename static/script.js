@@ -612,10 +612,17 @@ async function makeMove(moveData) {
         if (result.status === 'ok') {
             updateGameState(result.game_state);
 
+            if (result.forfeit_reason) {
+                const msgEl = document.getElementById('game-over-message');
+                if (msgEl) msgEl.textContent = result.forfeit_reason;
+                logMove(result.move_count, 'システム', result.forfeit_reason);
+                return;
+            }
+
             // Log Human Move
             // If makeMove was successful and we have move_str_ja, log it.
             // Human turn is implicitly handled here.
-            // But we need to check if it WAS a human turn? 
+            // But we need to check if it WAS a human turn?
             // Yes, makeMove is called by UI interaction.
             if (result.move_str_ja) {
                 logMove(result.move_count, '人間', result.move_str_ja);
