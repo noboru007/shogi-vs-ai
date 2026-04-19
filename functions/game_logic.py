@@ -8,7 +8,7 @@ import cshogi
 logger = logging.getLogger("shogi")
 
 # === 設定 ===
-CPU_DEPTH = 3           # 最大探索深度
+CPU_DEPTH = 5           # 最大探索深度（iterative_deepeningが時間制限内で実効深度を決める）
 CPU_TIME_LIMIT = 30     # 制限時間（秒）- 反復深化で時間内に最大限深く読む
 QUIESCENCE_DEPTH = 4    # 静止探索の最大深度
 
