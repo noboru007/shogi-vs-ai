@@ -213,8 +213,8 @@ class ShogiGame:
         self.turn = SENTE
         self.board = [[None for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
         self.hands = {SENTE: {}, GOTE: {}}
-        self.selected = None 
-        self.game_over = False 
+        self.selected = None
+        self.game_over = False
         self.move_count = 1
         self.last_move = None
         self._search_start_time = 0
@@ -222,6 +222,7 @@ class ShogiGame:
         self._search_aborted = False
         self._nodes_searched = 0
         self.init_board()
+        self._cb = cshogi.Board()
 
     def init_board(self):
         setup = [
@@ -341,12 +342,24 @@ class ShogiGame:
         cb.set_sfen(sfen)
         return cb
 
+    def _cb_synced_for(self, owner):
+        cb_owner = SENTE if self._cb.turn == cshogi.BLACK else GOTE
+        return cb_owner == owner
+
+    def _get_cb(self, owner):
+        if self._cb_synced_for(owner):
+            return self._cb
+        return self._to_cshogi_board(override_turn=owner)
+
+    def _resync_cb(self):
+        """Rebuild self._cb from current self.board/hands/turn (heavy; avoid in hot paths)."""
+        self._cb = cshogi.Board()
+        self._cb.set_sfen(self.get_sfen())
+
     def is_king_in_check(self, owner):
         try:
-            cb = self._to_cshogi_board(override_turn=owner)
-            return cb.is_check()
+            return self._get_cb(owner).is_check()
         except Exception:
-            # Fallback: king missing or otherwise unparseable position.
             return self.find_king(owner) is None
 
     def can_capture_king(self, attacker):
@@ -469,13 +482,16 @@ class ShogiGame:
             name = PIECES[piece["name"]]["promote"] if promote else piece["name"]
             self.board[ey][ex] = {"name": name, "owner": owner}
             self.last_move = {"to": end, "owner": owner}
+            move_dict = {"type": "move", "from": start_or_name, "to": end, "promote": promote}
         elif move_type == "drop":
             name = start_or_name
             self.board[ey][ex] = {"name": name, "owner": owner}
             self.hands[owner][name] -= 1
             self.last_move = {"to": end, "owner": owner}
+            move_dict = {"type": "drop", "name": name, "to": end}
         if captured:
             self.add_to_hand(owner, captured["name"])
+        self._cb.push_usi(to_usi(move_dict))
 
     def can_promote(self, sy, ey, owner, piece_name):
         if PIECES[piece_name]["promote"] is None:
@@ -530,12 +546,9 @@ class ShogiGame:
     def get_legal_moves(self, owner):
         """Return owner's legal moves as the legacy dict format.
 
-        Delegates to cshogi for correctness (handles nifu, uchifuzume, pinned
-        pieces, mandatory promotion, etc. in C++). Output dict shape preserved:
-            {"type": "move", "from": (x, y), "to": (x, y), "promote": bool}
-            {"type": "drop", "name": <kanji>, "to": (x, y)}
+        Uses the in-sync self._cb when possible (no SFEN roundtrip).
         """
-        cb = self._to_cshogi_board(override_turn=owner)
+        cb = self._get_cb(owner)
         moves = []
         for m in cb.legal_moves:
             usi = cshogi.move_to_usi(m)
@@ -751,12 +764,13 @@ class ShogiGame:
         self.hands = {}
         for k, v in raw_hands.items():
             self.hands[int(k)] = v
-            
+
         self.turn = state.get("turn", self.turn)
         self.game_over = state.get("game_over", self.game_over)
         self.move_count = state.get("move_count", self.move_count)
         self.last_move = state.get("last_move", self.last_move)
         self.vs_ai = state.get("vs_ai", self.vs_ai)
+        self._resync_cb()
 
     # === SFEN生成機能 ===
     def get_sfen(self):
@@ -885,6 +899,8 @@ class ShogiGame:
             logger.error("Error parsing SFEN: %s", e)
             raise
 
+        self._resync_cb()
+
     def _apply_move(self, move, owner):
         """手を適用し、undo情報を返す（copy.deepcopy不要の高速化）"""
         ex, ey = move["to"]
@@ -917,6 +933,7 @@ class ShogiGame:
             self.board[ey][ex] = {"name": name, "owner": owner}
             self.hands[owner][name] -= 1
 
+        self._cb.push_usi(to_usi(move))
         self.last_move = {"to": (ex, ey), "owner": owner}
         self.turn *= -1
         self.move_count += 1
@@ -928,6 +945,7 @@ class ShogiGame:
         owner = undo["owner"]
         ex, ey = move["to"]
 
+        self._cb.pop()
         self.turn *= -1
         self.move_count -= 1
         self.last_move = undo["old_last_move"]
@@ -988,22 +1006,20 @@ class ShogiGame:
         return [m for _, _, m in scored]
 
     def _generate_captures(self, owner):
-        """指定 owner の駒取りの手だけを列挙する。"""
+        """指定 owner の駒取りの手だけを列挙する（cshogi の合法手から駒取りのみ抽出）。"""
+        cb = self._get_cb(owner)
         captures = []
-        for y in range(BOARD_SIZE):
-            for x in range(BOARD_SIZE):
-                p = self.board[y][x]
-                if not p or p["owner"] != owner:
-                    continue
-                for tx, ty in self._piece_destinations(x, y, p, owner):
-                    target = self.board[ty][tx]
-                    if not target:
-                        continue
-                    if self.simulate_move_check("move", (x, y), (tx, ty), owner, promote=False):
-                        captures.append({"type": "move", "from": (x, y), "to": (tx, ty), "promote": False})
-                    if self.can_promote(y, ty, owner, p["name"]) and \
-                            self.simulate_move_check("move", (x, y), (tx, ty), owner, promote=True):
-                        captures.append({"type": "move", "from": (x, y), "to": (tx, ty), "promote": True})
+        for m in cb.legal_moves:
+            if cshogi.move_is_drop(m):
+                continue
+            to_sq = cshogi.move_to(m)
+            if cb.piece(to_sq) == 0:
+                continue
+            usi = cshogi.move_to_usi(m)
+            d = parse_usi_string(usi)
+            d["to"] = tuple(d["to"])
+            d["from"] = tuple(d["from"])
+            captures.append(d)
         return captures
 
     def _quiescence_search(self, alpha, beta, maximizing, depth):
@@ -1060,6 +1076,10 @@ class ShogiGame:
             return game_state.evaluate_board(), None
 
         current_turn = GOTE if maximizing else SENTE
+        # caller passed maximizing inconsistent with cshogi side-to-move:
+        # one-shot resync of cb at root call (recursion preserves invariant via push/pop).
+        if not game_state._cb_synced_for(current_turn):
+            game_state._cb = game_state._to_cshogi_board(override_turn=current_turn)
         legal_moves = game_state.get_legal_moves(current_turn)
 
         # 合法手なし = 詰み
