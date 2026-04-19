@@ -1,5 +1,7 @@
 from firebase_functions import https_fn, options
 
+# Deploy version: 2026-04-18T03:42
+
 # NOTE: main_flask is NOT imported at module level.
 # Firebase CLI discovery must complete within 10s, but importing
 # google-generativeai / openai is too slow for that window.

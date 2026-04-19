@@ -23,11 +23,11 @@ const MODEL_OPTIONS = [
     { value: "gpt-5.2", label: "GPT-5.2" },
     { value: "gpt-5.2-high", label: "GPT-5.2 (High Reasoning)" },
     { value: "claude-opus-4-7", label: "Claude Opus 4.7" },
-    { value: "claude-opus-4-7-high", label: "Claude Opus 4.7 (Adaptive)" },
+    { value: "claude-opus-4-7-medium", label: "Claude Opus 4.7 (Adaptive)" },
     { value: "claude-opus-4-6", label: "Claude Opus 4.6" },
-    { value: "claude-opus-4-6-high", label: "Claude Opus 4.6 (Adaptive)" },
+    { value: "claude-opus-4-6-medium", label: "Claude Opus 4.6 (Adaptive)" },
     { value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
-    { value: "claude-sonnet-4-6-high", label: "Claude Sonnet 4.6 (Adaptive)" },
+    { value: "claude-sonnet-4-6-medium", label: "Claude Sonnet 4.6 (Adaptive)" },
     { value: "human", label: "人間" },
     { value: "cpu", label: "3手先まで読むCPU" }
 ];

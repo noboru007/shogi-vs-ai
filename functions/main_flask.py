@@ -38,8 +38,8 @@ app = Flask(__name__, static_url_path='', static_folder='../static')
 CORS(app) # Enable CORS for all routes
 
 # Default settings
-DEFAULT_SENTE_MODEL = "gemini-2.5-pro"
-DEFAULT_GOTE_MODEL = "gemini-2.5-pro"
+DEFAULT_SENTE_MODEL = "gemini-3.1-pro-preview"
+DEFAULT_GOTE_MODEL = "gemini-3.1-pro-preview"
 
 # TTS Voice Settings per LLM model
 # Each entry: system_prompt for voice style, voice name from Gemini TTS
@@ -90,7 +90,7 @@ TTS_VOICE_CONFIG = {
     }
 }
 
-TTS_MODEL = "gemini-2.5-flash-preview-tts"
+TTS_MODEL = "gemini-3.1-flash-tts-preview"
 
 def get_tts_config(model_name, is_fallback=False):
     """Get TTS config for the given LLM model name."""
@@ -435,8 +435,37 @@ def parse_model_name(model_name):
     return model_name, display_name, reasoning_level
 
 
+def format_legal_moves_grouped(legal_moves_usi):
+    """Group legal moves by source square (or as drops) for readable prompt display.
+
+    出力例:
+        8b発: 8b9b, 8b7b, 8b6b, 8b5b, 8b4b, 8b3b
+        7c発: 7c7d
+        打: P*5e, P*5f
+    """
+    from_piece = {}
+    drops = []
+    for m in legal_moves_usi:
+        if "*" in m:
+            drops.append(m)
+        else:
+            src = m[:2]
+            from_piece.setdefault(src, []).append(m)
+    lines = []
+    for src in sorted(from_piece.keys()):
+        lines.append(f"        {src}発: {', '.join(from_piece[src])}")
+    if drops:
+        lines.append(f"        打: {', '.join(drops)}")
+    return "\n".join(lines)
+
+
 def build_prompts(game, turn, req_data, legal_moves_usi):
-    """Build system and user prompts based on instruction level."""
+    """Build system and user prompts based on instruction level.
+
+    Returns (system_prompt, user_prompt, retry_legal_list).
+    retry_legal_list is the grouped legal moves string for use in retry messages
+    (advanced mode only; None for simple/medium to respect the user's challenge level).
+    """
     sfen = game.get_sfen()
     
     # Describe pieces in hand for the AI
@@ -454,12 +483,17 @@ def build_prompts(game, turn, req_data, legal_moves_usi):
     else:
         piece_guide = "あなた**後手**で駒はSFEN上で小文字(p, l, n, s, g, b, r, k)で表されます。\n        相手の駒は大文字です。\n        あなたは盤面上側(Rank 1)から下方向(Rank 9)に向かって攻めます。"
 
-    guide_json_str = json.dumps(legal_moves_usi)
+    grouped_legal_str = format_legal_moves_grouped(legal_moves_usi)
     guide_instruction = f"""
-        選択可能な合法手のリスト: {guide_json_str}
-        
-        あなたは必ずこのリストの中から一手を選ばなければなりません。
-        リストにない手は反則負けとなります。
+        選択可能な合法手リスト（発駒マス別、合計 {len(legal_moves_usi)} 手）:
+        ----
+{grouped_legal_str}
+        ----
+
+        あなたは必ず上記リストの中から一手を選ばなければなりません。
+        リストに無い手は反則負けとなります。
+        特に、同じマスから複数の行き先が並んでいるブロック（例: 8b発の行）に
+        自分の選んだ手が含まれていない場合、それは違法手です。
         """
     
     # Prompt components
@@ -484,14 +518,19 @@ def build_prompts(game, turn, req_data, legal_moves_usi):
         制約：
         1. 回答は必ず日本語出力すること
         """
-    # Advanced: 合法手リスト付き — 従来版
+    # Advanced: 合法手リスト付き — 最終検証ステップを明示
     system_prompt_rules_advanced = f"""
         ルール（思考プロセス）:
-        1. SFENを正確に解析して、あなたの駒と相手の駒を正確に把握する。
-        2. 与えられた合法手リストの中から最善の一手を選択する。
-        ※自玉に王手がかかっている場合、それを回避しない手は違法手として除外すること。
-        3. 選択した最善手（Move）と、その回答を以下の回答フォーマットの形式で出力する。
-        ※最終的な回答は回答フォーマットに違反せず、指定されたUSI形式のみを出力すること。挨拶など余計な文章の出力は禁止する。
+        1. SFENを正確に解析し、自駒と相手駒を把握する。
+        2. 与えられた合法手リストの中から最善手の候補を検討する。
+        ※自玉に王手がかかっている場合、回避しない手は候補から除外する。
+        3. 最善手を1つに絞る。
+        4. 【最終検証 / 必須】出力直前に、選んだUSI文字列が合法手リストの要素と
+           **完全一致**するかを1文字ずつ確認する。該当する発駒マスのブロックを
+           再度読み、その中に選んだ手が存在することを確認すること。
+           一致しない場合はステップ2に戻り再選択する。
+           リストに無い手の出力は本タスクの最大の失敗である。
+        5. 回答フォーマットに従って出力する。挨拶や余計な文章の出力は禁止。
 
         制約：
         1. 回答は必ず日本語出力すること
@@ -512,12 +551,14 @@ def build_prompts(game, turn, req_data, legal_moves_usi):
     # Instruction level mapping
     ui_instruction_type = req_data.get('ai_instruction_type', 'medium')
     
+    retry_legal_list = None
     if ui_instruction_type == "simple":
         system_prompt = system_prompt_basic + system_prompt_format
         user_prompt = user_prompt_basic
     elif ui_instruction_type == "advanced":
         system_prompt = system_prompt_basic + system_prompt_piece_guide + system_prompt_rules_advanced + system_prompt_format
         user_prompt = user_prompt_basic + user_prompt_hand
+        retry_legal_list = grouped_legal_str
     else:  # "medium" (default)
         system_prompt = system_prompt_basic + system_prompt_rules_medium + system_prompt_format
         user_prompt = user_prompt_basic
@@ -527,7 +568,7 @@ def build_prompts(game, turn, req_data, legal_moves_usi):
         logger.info(f"=== SYSTEM PROMPT (Start of Game) ===\n{system_prompt}\n=====================================")
         logger.info(f"=== USER PROMPT (Start of Game) ===\n{user_prompt}\n===================================")
 
-    return system_prompt, user_prompt
+    return system_prompt, user_prompt, retry_legal_list
 
 
 def call_openai_api(model_name, system_prompt, user_prompt, reasoning_level):
@@ -712,13 +753,10 @@ def call_claude_api(model_name, system_prompt, user_prompt, reasoning_level):
     # Adaptive Thinking 時は思考トークンも max_tokens に含まれるため余裕を持たせる
     max_tokens = 32000 if reasoning_level else 16000
 
-    # システムプロンプトは毎手ほぼ同一なので Prompt Caching を有効化
     body = {
         "model": model_name,
         "max_tokens": max_tokens,
-        "system": [
-            {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}
-        ],
+        "system": system_prompt,
         "messages": [
             {"role": "user", "content": user_prompt}
         ],
@@ -736,7 +774,7 @@ def call_claude_api(model_name, system_prompt, user_prompt, reasoning_level):
 
     logger.debug(f"Claude API call: model={model_name}, reasoning={reasoning_level}")
 
-    resp = requests.post(url, headers=headers, json=body, timeout=240)
+    resp = requests.post(url, headers=headers, json=body, timeout=600)
     if resp.status_code != 200:
         logger.error(f"Claude API error {resp.status_code}: {resp.text[:300]}")
         raise Exception(f"Claude API error: {resp.status_code}")
@@ -745,9 +783,8 @@ def call_claude_api(model_name, system_prompt, user_prompt, reasoning_level):
 
     usage = data.get("usage", {})
     logger.debug(
-        "Claude usage: input=%s, output=%s, cache_read=%s, cache_create=%s",
+        "Claude usage: input=%s, output=%s",
         usage.get("input_tokens"), usage.get("output_tokens"),
-        usage.get("cache_read_input_tokens"), usage.get("cache_creation_input_tokens"),
     )
 
     # Extract text from content blocks (skip thinking blocks)
@@ -861,8 +898,21 @@ def build_ai_settings(ai_vs_ai_mode, sente_model, gote_model):
 
 
 def cpu_fallback(game, turn, last_error, tts_enabled, model_name, ai_settings):
-    """Execute CPU fallback when LLM fails."""
-    best_move = game.get_random_move()
+    """Execute CPU fallback when LLM fails.
+
+    Uses iterative deepening minimax (same engine as /cpu_move) with a short time
+    budget so fallback responses stay within request latency limits. Falls back
+    to random only if the search itself errors out or returns nothing.
+    """
+    best_move = None
+    try:
+        _, best_move = game.iterative_deepening(
+            maximizing=(turn == GOTE), time_limit=3.0
+        )
+    except Exception as e:
+        logger.warning(f"CPU fallback minimax failed: {e}. Using random move.")
+    if not best_move:
+        best_move = game.get_random_move()
     move_str_ja = ""
     current_move_count = game.move_count
     reasoning = f"(LLMの応答が不適切なため、CPUが代打ちしました。{last_error})"
@@ -935,8 +985,8 @@ def llm_move():
         legal_moves_usi = [u for m in legal_moves if (u := to_usi(m))]
 
         # Build prompts
-        system_prompt, user_prompt = build_prompts(game, turn, req_data, legal_moves_usi)
-        
+        system_prompt, user_prompt, retry_legal_list = build_prompts(game, turn, req_data, legal_moves_usi)
+
         # Retry loop
         max_retries = min(max(int(data.get('max_retries', 2)), 1), 3)
         last_error = ""
@@ -944,17 +994,25 @@ def llm_move():
         for attempt in range(max_retries):
             current_user_prompt = user_prompt
             if last_error:
-                current_user_prompt += f"\n\n前回の回答エラー: {last_error}\nもう一度正しい手を選んでください。"
+                current_user_prompt += f"\n\n【前回の違反】{last_error}"
+                if retry_legal_list:
+                    current_user_prompt += (
+                        f"\n改めて次の合法手リストからのみ選択してください（発駒マス別）:\n"
+                        f"----\n{retry_legal_list}\n----\n"
+                        f"出力前に、選んだMoveがリスト内の要素と完全一致することを必ず確認すること。"
+                    )
+                else:
+                    current_user_prompt += "\nもう一度正しい手を選んでください。"
 
             try:
                 text = call_llm(model_name, system_prompt, current_user_prompt, reasoning_level)
                 logger.debug(f"Raw LLM Response: {text}")
 
                 usi_move, reasoning = parse_llm_response(text)
-                
+
                 if not usi_move:
                     logger.debug(f"No USI found in response.")
-                    last_error = f"LLMの一手と理由: {usi_move}.  {reasoning}"
+                    last_error = "前回の応答からUSI形式の手を抽出できませんでした。回答フォーマットの `Move:` 行にUSI手のみを記載してください。"
                     continue
 
                 logger.debug(f"Found valid USI move: {usi_move}")
@@ -962,7 +1020,7 @@ def llm_move():
 
                 if not move_executed:
                     logger.debug("Invalid move. Retrying...")
-                    last_error = f"LLMの一手と理由: {usi_move}.  {reasoning}"
+                    last_error = f"前回の出力 `{usi_move}` は合法手リストに存在しません。"
                     continue
 
                 # Move is valid — execute
